@@ -76,10 +76,12 @@ class Recognizer2D(BaseRecognizer):
         if self.feature_extraction:
             # perform spatial pooling
             avg_pool = nn.AdaptiveAvgPool2d(1)
+            print("======before avg pool, x.shape:", x.shape)
             x = avg_pool(x)
             # squeeze dimensions
             x = x.reshape((batches, num_segs, -1))
             # temporal average pooling
+            print("========before mean, x.shape:", x.shape)
             x = x.mean(axis=1)
             return x
 

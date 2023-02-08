@@ -12,7 +12,8 @@ from React.model.HungarianMatcher import HungarianMatcher
 from React.model.roi_align import ROIAlign
 from React.model.transformer import Transformer, MLP
 from React.utill.misc import nested_tensor_from_tensor_list, inverse_sigmoid
-from React.utill.temporal_box_producess import preprocess_groundtruth, segment_iou, ml2se, postprocessing_test_format, se2ml, segment_giou
+from React.utill.temporal_box_producess import preprocess_groundtruth, segment_iou, ml2se, postprocessing_test_format, \
+    se2ml, segment_giou
 from mmaction.models.builder import LOCALIZERS
 from mmaction.models.localizers import BaseTAPGenerator
 
@@ -105,11 +106,14 @@ class React(BaseTAPGenerator):
         # Define Module
         self.input_proj = MLP(input_feat_dim, feat_dim, feat_dim, 1)
 
+        # first feat_dim as content query, last feat_dim as position query
         self.query_embed = nn.Embedding(num_queries, self.feat_dim * 2)
 
-        self.transformer = Transformer(num_class=num_class, d_model=feat_dim, nhead=n_head, num_encoder_layers=num_encoder_layers,
+        self.transformer = Transformer(num_class=num_class, d_model=feat_dim, nhead=n_head,
+                                       num_encoder_layers=num_encoder_layers,
                                        num_decoder_layers=num_decoder_layers, encoder_sample_num=encoder_sample_num,
-                                       decoder_sample_num=decoder_sample_num, dim_feedforward=1024, normalize_before=False,
+                                       decoder_sample_num=decoder_sample_num, dim_feedforward=1024,
+                                       normalize_before=False,
                                        return_intermediate_dec=True, dropout=0.)
 
         self.segment_embed = MLP(feat_dim, feat_dim, 2, 3)
@@ -137,6 +141,10 @@ class React(BaseTAPGenerator):
         self.cls_warmup_step = 0
         self.contrastive_count = 0.
 
+        empty_weight = torch.ones(self.num_class)
+        empty_weight[-1] = 0.1
+        self.register_buffer('empty_weight', empty_weight)
+
     def forward(self,
                 raw_feature,
                 gt_bbox=None,
@@ -153,7 +161,8 @@ class React(BaseTAPGenerator):
         """Define the computation performed at every call."""
 
         if return_loss:
-            return self.forward_train(gt_bbox, snippet_num, raw_feature, video_gt_box, sample_gt, pos_feat, pos_sample_segment, neg_feat,
+            return self.forward_train(gt_bbox, snippet_num, raw_feature, video_gt_box, sample_gt, pos_feat,
+                                      pos_sample_segment, neg_feat,
                                       neg_sample_segment, candidated_segments, video_meta)
 
         else:
@@ -180,16 +189,42 @@ class React(BaseTAPGenerator):
 
         # all gt for a whole video, which only used for evaluation (see the evaluate method in the dataset class)
         video_gt = preprocess_groundtruth(video_gt_box, origin_snippet_num)
+        for i, v_meta in enumerate(video_meta):
+            video_gt[i]["video_name"] = v_meta["video_name"]
+        prepare_gt = preprocess_groundtruth(video_gt_box, origin_snippet_num, to_tensor=True, device=input_feature.device)
 
         query_vector = self.query_embed.weight
 
         # serially predict the result for each clip and paralelly for the batch videos.
         for clip in range(input_feature.shape[1]):
-            result, init_reference, inter_references, _, _ = self.transformer(input_feature[:, clip, :, :], masks[:, clip, :],
+            result, init_reference, inter_references, _, _ = self.transformer(input_feature[:, clip, :, :],
+                                                                              masks[:, clip, :],
                                                                               query=query_vector,
-                                                                              snippet_num=snippet_num[:, clip])  # bz, Lq, dim
+                                                                              snippet_num=snippet_num[:,
+                                                                                          clip])  # bz, Lq, dim
 
             outputs_class, outputs_coord = self.output_refinement(init_reference, inter_references, result)
+
+            # # calculate loss dict
+            # pred_iou = self.iou_predictor(result).sigmoid()
+            # pred_cen = self.cen_predictor(result).sigmoid()
+            # gt_ = gt_bbox[clip]
+            # pred = {"pred_logits": outputs_class[-1], "pred_seg": outputs_coord[-1], 'pred_iou': pred_iou[-1],
+            #         'pred_cen': pred_cen[-1]}
+            # indices = self.HungarianMatcher(pred, gt_)
+            #
+            # num_segs = sum(len(t["labels"]) for t in gt_)
+            # num_segs = torch.as_tensor([num_segs], dtype=torch.float, device=device)
+            # num_segs = torch.clamp(num_segs, min=1).item()
+            #
+            # loss_dict = self.loss_segs(pred, gt_, indices, num_segs)
+            #
+            # ce_loss = self.loss_labels(pred, gt_, indices, num_segs)
+            # loss_dict['ce_loss'] = ce_loss * self.coef_ce_now
+            #
+            # # IoU decay
+            # iou_decay = self.iou_decay(pred)
+            # loss_dict['iou_decay'] = iou_decay * self.coef_iou_decay
 
             pred_cls_out = outputs_class[-1]
             pred_cls_p = torch.sigmoid(pred_cls_out)
@@ -202,8 +237,10 @@ class React(BaseTAPGenerator):
 
             clip_mask = raw_feature.clip_mask[:, clip]
 
-            clip_pred = postprocessing_test_format(pred_seg, pred_cls_p, self.num_class, snippet_num=snippet_num[:, clip],
-                                                   whole_video_snippet_num=origin_snippet_num, clip_len=self.clip_len, clip_idx=clip,
+            clip_pred = postprocessing_test_format(pred_seg, pred_cls_p, self.num_class,
+                                                   snippet_num=snippet_num[:, clip],
+                                                   whole_video_snippet_num=origin_snippet_num, clip_len=self.clip_len,
+                                                   clip_idx=clip,
                                                    stride_rate=self.stride_rate,
                                                    threshold=self.test_bg_thershold)
 
@@ -226,7 +263,8 @@ class React(BaseTAPGenerator):
 
         return pd.DataFrame(data={'predition': video_pred, 'groundtruth': video_gt}).values
 
-    def forward_train(self, gt_bbox, snippet_num, raw_feature, video_gt_box, sample_gt, pos_feat, pos_sample_segment, neg_feat,
+    def forward_train(self, gt_bbox, snippet_num, raw_feature, video_gt_box, sample_gt, pos_feat, pos_sample_segment,
+                      neg_feat,
                       neg_sample_segment, candidated_segments, video_meta):
         raw_feature = nested_tensor_from_tensor_list(raw_feature, self.clip_len)  # num_videos, clip_len, dim
         snippet_num = snippet_num.cuda()  # used for calculated attention offset, which is the snippet num after downsampling
@@ -244,7 +282,8 @@ class React(BaseTAPGenerator):
             contrast_input_feature = torch.cat([input_feature, pos_feat.tensors.cuda(), neg_feat.tensors.cuda()],
                                                dim=0)  # 3xbatch, time, dim
             contrast_sample_gt = torch.cat(
-                [sample_gt.unsqueeze(1), candidated_segments, pos_sample_segment.unsqueeze(1), neg_sample_segment.unsqueeze(1)],
+                [sample_gt.unsqueeze(1), candidated_segments, pos_sample_segment.unsqueeze(1),
+                 neg_sample_segment.unsqueeze(1)],
                 dim=1).cuda()  # bz, 1 + k(4) + 1 + 1
             h = self.input_proj(contrast_input_feature)
             contrastive_loss = self.loss_ace_enc(contrast_sample_gt, h, K=self.K)
@@ -279,7 +318,8 @@ class React(BaseTAPGenerator):
         loss_dict['ce_loss'] = ce_loss * self.coef_ce_now
 
         # loss ace-dec
-        gt_loss = self.loss_ace_dec(tgt, indices, memory, gt_bbox, memory_key_padding_mask=masks, snippet_num=snippet_num)
+        gt_loss = self.loss_ace_dec(tgt, indices, memory, gt_bbox, memory_key_padding_mask=masks,
+                                    snippet_num=snippet_num)
         loss_dict['gt_loss'] = gt_loss * self.coef_acedec
 
         # IoU decay
@@ -335,18 +375,17 @@ class React(BaseTAPGenerator):
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]).long()
-        target_classes = torch.full(src_logits.shape[:2], self.num_class, dtype=torch.int64, device=src_logits.device)
+        target_classes = torch.full(src_logits.shape[:2], self.num_class - 1, dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
 
         # loss_ce = self.criterion(src_logits.flatten(0, 1), target_classes.flatten(), alpha=0.75)
-
-        targets = target_classes.flatten()
-        bz = len(targets)
-        device = src_logits.device
-        targets = torch.zeros(bz, self.num_class + 1, device=device).scatter_(1, targets.unsqueeze(-1), 1)
-        targets = targets[:, :self.num_class]
-        loss_ce = self.criterion(src_logits.flatten(0, 1), targets, num_boxes)
-        # loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, weight=torch.zeros(21))
+        # targets = target_classes.flatten()
+        # bz = len(targets)
+        # device = src_logits.device
+        # targets = torch.zeros(bz, self.num_class + 1, device=device).scatter_(1, targets.unsqueeze(-1), 1)
+        # targets = targets[:, :self.num_class]
+        # loss_ce = self.criterion(src_logits.flatten(0, 1), targets, num_boxes)
+        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
 
         return loss_ce
 
@@ -386,16 +425,26 @@ class React(BaseTAPGenerator):
         loss_cen = F.binary_cross_entropy(pred_cen, tar_cen)
 
         # predict quality: regress the IoU value
-        pred_seg_iou = segment_iou(ml2se(outputs['pred_seg'].flatten(0, 1)), target_segs).view(outputs['pred_seg'].shape[0],
-                                                                                               outputs['pred_seg'].shape[1],
-                                                                                               target_segs.shape[0])
+        pred_seg_iou = segment_iou(ml2se(outputs['pred_seg'].flatten(0, 1)), target_segs).view(
+            outputs['pred_seg'].shape[0],
+            outputs['pred_seg'].shape[1],
+            target_segs.shape[0])
         targets_start_idx = np.cumsum([len(t['segments']) for t in targets])
         targets_start_idx = np.concatenate([[0], targets_start_idx])
-        tar_iou = [
-            vid_seg_iou[:, targets_start_idx[i]:targets_start_idx[i + 1]].max(dim=1, keepdim=True)[0]
-            if (targets_start_idx[i + 1] - targets_start_idx[i]) > 0 else torch.zeros(vid_seg_iou.shape[0], 1, device=vid_seg_iou.device)
-            for i, vid_seg_iou in enumerate(pred_seg_iou)
-        ]
+        tar_iou = []
+        for i, vid_seg_iou in enumerate(pred_seg_iou):
+            if (targets_start_idx[i + 1] - targets_start_idx[i]) > 0 and \
+                    targets_start_idx[i + 1] < vid_seg_iou.shape[1]:
+                res = vid_seg_iou[:, targets_start_idx[i]:targets_start_idx[i + 1]].max(dim=1, keepdim=True)[0]
+            else:
+                res = torch.zeros(vid_seg_iou.shape[0], 1, device=vid_seg_iou.device)
+            tar_iou.append(res)
+
+        # tar_iou = [
+        #     vid_seg_iou[:, targets_start_idx[i]:targets_start_idx[i + 1]].max(dim=1, keepdim=True)[0]
+        #     if (targets_start_idx[i + 1] - targets_start_idx[i]) > 0 else torch.zeros(vid_seg_iou.shape[0], 1, device=vid_seg_iou.device)
+        #     for i, vid_seg_iou in enumerate(pred_seg_iou)
+        # ]
 
         tar_iou = torch.stack(tar_iou, dim=0)
 
@@ -414,7 +463,8 @@ class React(BaseTAPGenerator):
 
         return iou_reg_loss
 
-    def loss_ace_dec(self, query_feature, indices, memory, gt_segments, memory_mask=None, memory_key_padding_mask=None, snippet_num=None):
+    def loss_ace_dec(self, query_feature, indices, memory, gt_segments, memory_mask=None, memory_key_padding_mask=None,
+                     snippet_num=None):
         with torch.no_grad():
             valid_ratios = self.transformer.get_valid_ratio(memory_key_padding_mask).unsqueeze(-1)
             idx = self._get_src_permutation_idx(indices)
@@ -424,10 +474,13 @@ class React(BaseTAPGenerator):
             gt_num = len(target_segs)
             target_classes = torch.cat([t["labels"][J] for t, (_, J) in zip(gt_segments, indices)]).long()
 
-            targets = torch.zeros(gt_num, self.num_class, device=target_classes.device).scatter_(1, target_classes.unsqueeze(-1), 1)
+            targets = torch.zeros(gt_num, self.num_class, device=target_classes.device).scatter_(1,
+                                                                                                 target_classes.unsqueeze(
+                                                                                                     -1), 1)
         # todo hack into decoder
         result = self.transformer.decoder.feed_gt(query_feature, memory.transpose(0, 1), memory_mask=memory_mask,
-                                                  memory_key_padding_mask=memory_key_padding_mask, gt_segments=target_segs, idx=idx,
+                                                  memory_key_padding_mask=memory_key_padding_mask,
+                                                  gt_segments=target_segs, idx=idx,
                                                   valid_ratio=valid_ratios,
                                                   snippet_num=snippet_num)
 

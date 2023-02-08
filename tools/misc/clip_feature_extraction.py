@@ -16,10 +16,13 @@ from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import get_dist_info, init_dist, load_checkpoint
 from mmcv.runner.fp16_utils import wrap_fp16_model
 
+import mmaction
 from mmaction.apis import multi_gpu_test, single_gpu_test
 from mmaction.datasets import build_dataloader, build_dataset
 from mmaction.models import build_model
 from mmaction.utils import register_module_hooks
+
+print(mmaction.__file__)
 
 
 def parse_args():

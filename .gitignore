@@ -1,0 +1,6 @@
+*/__pycache__/*
+mmaction/*
+mmaction2.egg-info
+*.pyc
+*.o
+*.so

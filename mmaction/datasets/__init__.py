@@ -19,6 +19,7 @@ from .ssn_dataset import SSNDataset
 from .video_dataset import VideoDataset
 
 from React.thumos_dataset import ThumosDataset
+from React.repcount_dataset import RepCountDataset
 
 __all__ = [
     'VideoDataset', 'build_dataloader', 'build_dataset', 'RepeatDataset',
@@ -26,5 +27,6 @@ __all__ = [
     'HVUDataset', 'AudioDataset', 'AudioFeatureDataset', 'ImageDataset',
     'RawVideoDataset', 'AVADataset', 'AudioVisualDataset',
     'BaseMiniBatchBlending', 'CutmixBlending', 'MixupBlending', 'DATASETS',
-    'PIPELINES', 'BLENDINGS', 'PoseDataset', 'ConcatDataset', 'ThumosDataset'
+    'PIPELINES', 'BLENDINGS', 'PoseDataset', 'ConcatDataset', 'ThumosDataset',
+    'RepCountDataset'
 ]

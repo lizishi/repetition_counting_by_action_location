@@ -10,6 +10,7 @@ import torch
 
 from mmaction.datasets.pipelines import Compose
 from mmaction.models import build_model
+from mmcv.runner import load_checkpoint
 
 
 def parse_args():
@@ -76,20 +77,15 @@ def main():
         type='Recognizer2D',
         backbone=dict(
             type='ResNet',
+            pretrained=None,
             depth=50,
-            in_channels=args.in_channels,
             norm_eval=False),
-        cls_head=dict(
-            type='TSNHead',
-            num_classes=200,
-            in_channels=2048,
-            spatial_type='avg',
-            consensus=dict(type='AvgConsensus', dim=1)),
-        test_cfg=dict(average_clips=None))
+        train_cfg=None,
+        test_cfg=dict(feature_extraction=True))
+
     model = build_model(model_cfg)
     # load pretrained weight into the feature extractor
-    state_dict = torch.load(args.ckpt)['state_dict']
-    model.load_state_dict(state_dict)
+    load_checkpoint(model, args.ckpt, map_location='cpu')
     model = model.cuda()
     model.eval()
 

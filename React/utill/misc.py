@@ -336,7 +336,7 @@ def nested_tensor_from_tensor_list(tensor_list, clip_len=None, snippet_num=None)
     elif tensor_list[0].ndim == 2:
         max_num_size = max([feat.shape[0] for feat in tensor_list])
         min_dim_size = min([feat.shape[1] for feat in tensor_list])
-        batch_shape = [len(tensor_list), max_num_size, min_dim_size]
+        batch_shape = [len(tensor_list), clip_len, min_dim_size]
         bz, num, dim = batch_shape
         dtype = tensor_list[0].dtype
         device = tensor_list[0].device
