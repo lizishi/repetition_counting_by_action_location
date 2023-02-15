@@ -47,6 +47,8 @@ model = dict(
     coef_acedec=1.0,
     coef_quality=1.0,
     coef_iou_decay=100.0,
+    use_dab=True,
+    no_sine_embed=False,
 )
 
 # dataset settings
@@ -203,7 +205,5 @@ optimizer_config = dict()
 lr_config = dict(policy="step", step=[contrastive_epoch + 7], gamma=0.1, by_epoch=True)
 
 # runtime settings
-work_dir = (
-    "/DATA/disk1/lizishi/react_out/repcount_20230214_with_null_class_iou_decay100"
-)
-output_config = dict(out=f"{work_dir}/results.json")
+work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230215_dab_sine_more_layer"
+output_config = dict(out=f"{work_dir}/{work_dir.split('/')[-1]}.json")

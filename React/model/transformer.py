@@ -46,6 +46,8 @@ class Transformer(nn.Module):
         activation="relu",
         normalize_before=False,
         return_intermediate_dec=False,
+        use_dab=False,
+        no_sine_embed=False,
     ):
         super().__init__()
 
@@ -80,11 +82,15 @@ class Transformer(nn.Module):
             num_decoder_layers,
             decoder_norm,
             return_intermediate=return_intermediate_dec,
+            use_dab=use_dab,
+            d_model=d_model,
+            no_sine_embed=no_sine_embed,
         )
 
         self.d_model = d_model
         self.nhead = nhead
         self.num_class = num_class
+        self.use_dab = use_dab
 
         self._reset_parameters()
 
@@ -95,9 +101,9 @@ class Transformer(nn.Module):
         for m in self.modules():
             if isinstance(m, DeformableAttention):
                 m._reset_parameters()
-
-        xavier_uniform_(self.decoder.ref_point_head.weight.data, gain=1.0)
-        constant_(self.decoder.ref_point_head.bias.data, 0.0)
+        if not self.use_dab:
+            xavier_uniform_(self.decoder.ref_point_head.weight.data, gain=1.0)
+            constant_(self.decoder.ref_point_head.bias.data, 0.0)
 
     @staticmethod
     def generate_square_subsequent_mask(sz, device):
@@ -211,13 +217,32 @@ class TransformerEncoder(nn.Module):
 
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=False):
+    def __init__(
+        self,
+        decoder_layer,
+        num_layers,
+        norm=None,
+        return_intermediate=False,
+        use_dab=False,
+        d_model=256,
+        no_sine_embed=False,
+    ):
         super().__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
         self.norm = norm
+        self.use_dab = use_dab
+        self.d_model = d_model
+        self.no_sine_embed = no_sine_embed
 
-        self.ref_point_head = nn.Linear(self.layers[0].d_model, 1)
+        if use_dab:
+            self.query_scale = MLP(d_model, d_model, d_model, 2)
+            if self.no_sine_embed:
+                self.ref_point_head = MLP(2, d_model, d_model, 3)
+            else:
+                self.ref_point_head = MLP(d_model, d_model, d_model, 2)
+        else:
+            self.ref_point_head = nn.Linear(d_model, 1)
 
         # for segment refinement
         self.segment_embed = None
@@ -248,11 +273,24 @@ class TransformerDecoder(nn.Module):
                 torch.ones((bz, Lq, 2), device=tgt.device) * 0.5
             )  # set other not-trained queries to [0.5, 0.5]
             reference_point[idx] = refer_seg
-            reference_point = reference_point * valid_ratio.unsqueeze(-1)
         output = tgt
         intermediate = []
 
         for i, layer in enumerate(self.layers):
+            reference_point_input = reference_point * valid_ratio.unsqueeze(-1)
+            if self.use_dab:
+                if self.no_sine_embed:
+                    raw_query_pos = self.ref_point_head(
+                        reference_point_input
+                    ).transpose(0, 1)
+                else:
+                    query_sine_embed = gen_sineembed_for_position(reference_point_input)
+                    raw_query_pos = self.ref_point_head(query_sine_embed).transpose(
+                        0, 1
+                    )
+                pos_scale = self.query_scale(output) if i != 0 else 1
+                query_pos = pos_scale * raw_query_pos
+
             output = layer(
                 output,
                 memory,
@@ -261,7 +299,7 @@ class TransformerDecoder(nn.Module):
                 tgt_key_padding_mask=tgt_key_padding_mask,
                 memory_key_padding_mask=memory_key_padding_mask,
                 query_pos=query_pos,
-                reference_point=reference_point,
+                reference_point=reference_point_input,
                 valid_ratio=valid_ratio,
                 snippet_num=snippet_num,
             )
@@ -294,18 +332,35 @@ class TransformerDecoder(nn.Module):
         snippet_num=None,
     ):
         bz = memory.shape[1]
-
-        output, tgt = torch.chunk(tgt, 2, dim=1)
-        tgt = tgt.unsqueeze(0).expand(bz, -1, -1)
-        output = output.unsqueeze(0).expand(bz, -1, -1).transpose(0, 1)
-        query_features = output
+        content_query = tgt[:, : self.d_model]
+        content_query = content_query.unsqueeze(0).expand(bz, -1, -1).transpose(0, 1)
+        output = content_query
         intermediate = []
         intermediate_reference_points = []
 
-        reference_point = torch.sigmoid(self.ref_point_head(tgt))  # bz, Lq, 1
+        position_query = tgt[:, self.d_model :]
+        if self.use_dab:
+            reference_point = position_query.sigmoid().unsqueeze(0).expand(bz, -1, -1)
+        else:
+            reference_point = self.ref_point_head(position_query).sigmoid()
         init_reference_point = reference_point
 
         for i, layer in enumerate(self.layers):
+            reference_point_input = reference_point * valid_ratio.unsqueeze(-1)
+            if self.use_dab:
+                if self.no_sine_embed:
+                    raw_query_pos = self.ref_point_head(
+                        reference_point_input
+                    ).transpose(0, 1)
+                else:
+                    query_sine_embed = gen_sineembed_for_position(reference_point_input)
+                    raw_query_pos = self.ref_point_head(query_sine_embed).transpose(
+                        0, 1
+                    )
+                query_pos = raw_query_pos
+                pos_scale = self.query_scale(output) if i != 0 else 1
+                query_pos = pos_scale * raw_query_pos
+
             output = layer(
                 output,
                 memory,
@@ -315,26 +370,25 @@ class TransformerDecoder(nn.Module):
                 memory_key_padding_mask=memory_key_padding_mask,
                 pos=tgt,
                 query_pos=query_pos,
-                reference_point=reference_point * valid_ratio.unsqueeze(-1),
+                reference_point=reference_point_input,
                 valid_ratio=valid_ratio,
                 snippet_num=snippet_num,
             )
 
             # segment refinement
             # update the reference point/segment of the next layer according to the output from the current layer
-            tmp = self.segment_embed[i](output).transpose(0, 1)  # bz, Lq, 2
+            delta_segment = self.segment_embed[i](output).transpose(0, 1)  # bz, Lq, 2
             # first layer
             if reference_point.shape[-1] == 1:
-                new_reference_points = tmp
-                new_reference_points[..., :1] = tmp[..., :1] + inverse_sigmoid(
-                    reference_point
-                )
+                new_reference_points = delta_segment
+                new_reference_points[..., :1] = delta_segment[
+                    ..., :1
+                ] + inverse_sigmoid(reference_point)
                 new_reference_points = new_reference_points.sigmoid()
-                reference_point = new_reference_points.detach()
             else:  # other layers
-                new_reference_points = tmp + inverse_sigmoid(reference_point)
+                new_reference_points = delta_segment + inverse_sigmoid(reference_point)
                 new_reference_points = new_reference_points.sigmoid()
-                reference_point = new_reference_points.detach()
+            reference_point = new_reference_points.detach()
 
             if self.return_intermediate:
                 intermediate.append(output)
@@ -351,7 +405,7 @@ class TransformerDecoder(nn.Module):
                 torch.stack(intermediate),
                 init_reference_point,
                 torch.stack(intermediate_reference_points),
-                query_features,
+                content_query,
             )
 
         return output, reference_point
@@ -366,7 +420,7 @@ class DeformableAttention(nn.Module):
         self.embed_dim = embed_dim
         self.head_dim = embed_dim // num_heads
         self.num_heads = num_heads
-        self.K = sampling_point
+        self.num_points = sampling_point
 
         # padding mode: if offset >1 or <-1, pad with boarder value, else 0.
         self.time_feature_sample = GridSample1d(padding_mode=False, align_corners=True)
@@ -384,8 +438,8 @@ class DeformableAttention(nn.Module):
         )
         grid_init = thetas.cos()
 
-        grid_init = grid_init.view(self.num_heads, 1).repeat(1, self.K)
-        for i in range(self.K):
+        grid_init = grid_init.view(self.num_heads, 1).repeat(1, self.num_points)
+        for i in range(self.num_points):
             grid_init[:, i] *= i + 1
 
         with torch.no_grad():
@@ -406,8 +460,8 @@ class DeformableAttention(nn.Module):
         reference_point,
         snippet_num,
     ):
-        # query Lq, batch_size, Dim
-        # value Lv, batch_size, Dim
+        # query Lq, batch_size, embed_dim
+        # value Lv, batch_size, embed_dim
         # value_valid_ratio: batch_size, 1 (no-padding feature num)/(max feautre num)
 
         Lq, bz, _ = query.shape
@@ -422,52 +476,59 @@ class DeformableAttention(nn.Module):
             )
 
         # prepare for value
-        value = value.permute(1, 2, 0)  # bz, dim, Lv
-
-        value = value.reshape(
-            bz * self.num_heads, self.head_dim, Lv
-        )  # bz*N_head, head_dim, Lv
+        # bz*N_head, head_dim, Lv
+        value = value.permute(1, 2, 0).view(bz * self.num_heads, self.head_dim, Lv)
 
         # sampling offset
         offset = (
             self.sampling_offsets(query.flatten(0, 1))
-            .view(Lq, bz, self.num_heads, self.K)
+            .view(Lq, bz, self.num_heads, self.num_points)
             .permute(1, 2, 0, 3)
-        )  # bz, N_head, Lq, K
+        )  # bz, N_head, Lq, num_points
 
         if reference_point.shape[-1] == 2:
-            # offset: bz, N_head, Lq, K , reference_point bz,Lq
+            # offset: bz, N_head, Lq, num_points
+            # reference_point: bz, Lq
             offset = (
                 reference_point[..., :1].view(bz, 1, Lq, 1)
-                + offset / self.K * reference_point[..., 1:].view(bz, 1, Lq, 1) * 0.5
+                + offset
+                / self.num_points
+                * reference_point[..., 1:].view(bz, 1, Lq, 1)
+                * 0.5
             )
         elif reference_point.shape[-1] == 1:
             offset = reference_point.view(bz, 1, Lq, 1) + offset / snippet_num.view(
                 -1, 1, 1, 1
             )
+        else:
+            raise ValueError(
+                "Last dim of reference_points must be 2 or 4, but get {} instead.".format(
+                    reference_point.shape[-1]
+                )
+            )
 
         offset = offset * 2 - 1
-        offset = offset.reshape(bz * self.num_heads, Lq * self.K)
+        offset = offset.reshape(bz * self.num_heads, Lq * self.num_points)
 
         # calculate attention weight
         attn_wight = (
             self.atten_weight(query.flatten(0, 1))
-            .view(Lq, bz, self.num_heads, self.K)
+            .view(Lq, bz, self.num_heads, self.num_points)
             .permute(1, 2, 0, 3)
-        )  # bz, N_head, Lq, K
+        )  # bz, N_head, Lq, num_points
         attn_wight = torch.softmax(attn_wight, dim=-1)
         attn_wight = attn_wight.reshape(
-            bz * self.num_heads * Lq, self.K, 1
-        )  # bz*N_head*Lq, K, 1
+            bz * self.num_heads * Lq, self.num_points, 1
+        )  # bz*N_head*Lq, num_points, 1
 
         # sampling time fuature from value
-        # sample (bz*N_head, head_dim, Lv) with offset (bz*N_head, Lq*K) ---> (bz*N_head, head_dim, Lq * K)
+        # sample (bz*N_head, head_dim, Lv) with offset (bz*N_head, Lq*num_points) ---> (bz*N_head, head_dim, Lq * K)
         value = self.time_feature_sample(value.contiguous(), offset).view(
-            bz * self.num_heads, self.head_dim, Lq, self.K
+            bz * self.num_heads, self.head_dim, Lq, self.num_points
         )
         value = value.transpose(1, 2).reshape(
-            bz * self.num_heads * Lq, self.head_dim, self.K
-        )  # bz*N_head*Lq, head_dim, K
+            bz * self.num_heads * Lq, self.head_dim, self.num_points
+        )  # bz*N_head*Lq, head_dim, num_points
 
         # calculate attention output
         attn_out = torch.matmul(value, attn_wight)  # bz*N_head*Lq, head_dim, 1
@@ -501,7 +562,6 @@ class RelationAttention(nn.Module):
                 .unsqueeze(0)
                 .repeat(bz, 1, 1)
             )  # bz, Lq, Lq
-
             segments = ml2se(segments)
             iou = segment_iou(segments, segments)  # bz,Lq,Lq
             adj_matrix[iou <= 0.2] = 1
@@ -519,9 +579,11 @@ class RelationAttention(nn.Module):
         Lq, bz, _ = query.shape
         query = query.transpose(0, 1)
 
-        # if reference.shape[-1] == 2:
-        #     adj_matrix = self.construct_graph(reference, query)
-        #     adj_matrix = adj_matrix.unsqueeze(1).expand(-1, self.nhead, -1, -1).flatten(0, 1)
+        if reference.shape[-1] == 2:
+            adj_matrix = self.construct_graph(reference, query)
+            adj_matrix = (
+                adj_matrix.unsqueeze(1).expand(-1, self.nhead, -1, -1).flatten(0, 1)
+            )
 
         h = query
         Q = (
@@ -544,8 +606,8 @@ class RelationAttention(nn.Module):
         )
         attn = torch.matmul(Q, K.transpose(-1, -2)) / math.sqrt(Q.shape[-1])
 
-        # if reference.shape[-1] == 2:
-        #     attn = attn.masked_fill(adj_matrix, float("-inf"))
+        if reference.shape[-1] == 2:
+            attn = attn.masked_fill(adj_matrix, float("-inf"))
 
         attn = torch.softmax(attn, dim=-1)
 
@@ -687,29 +749,27 @@ class TransformerDecoderLayer(nn.Module):
         sample_num=3,
     ):
         super().__init__()
+
+        # self attention
         self.self_attn = RelationAttention(d_model, nhead, nlayer=1)
+        self.dropout1 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+
+        # cross attention
         self.cross_attn = DeformableAttention(
             d_model, num_heads=nhead, sampling_point=sample_num
         )
+        self.dropout2 = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(d_model)
 
-        self.d_model = d_model
-        self.num_heads = nhead
-        self.K = sample_num
-        self.head_dim = d_model // nhead
         # Implementation of Feedforward model
         self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.dropout4 = nn.Dropout(dropout)
+        self.norm3 = nn.LayerNorm(d_model)
 
         self.activation = _get_activation_fn(activation)
-        self.normalize_before = normalize_before
 
     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
         return tensor if pos is None else tensor + pos
@@ -728,10 +788,13 @@ class TransformerDecoderLayer(nn.Module):
         valid_ratio=None,
         snippet_num=None,
     ):
-        q = k = self.with_pos_embed(tgt, query_pos)
+        # self attention
+        q = self.with_pos_embed(tgt, query_pos)
         tgt2 = self.self_attn(q, reference_point)
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
+
+        # cross attention
         tgt2 = self.cross_attn(
             query=tgt2,
             value=memory,
@@ -742,9 +805,12 @@ class TransformerDecoderLayer(nn.Module):
         )
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
-        tgt = tgt + self.dropout3(tgt2)
+
+        # ffn
+        tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout4(tgt2)
         tgt = self.norm3(tgt)
+
         return tgt
 
 
@@ -761,3 +827,27 @@ def _get_activation_fn(activation):
     if activation == "glu":
         return F.glu
     raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
+
+
+def gen_sineembed_for_position(pos_tensor):
+    scale = 2 * math.pi
+    dim_t = torch.arange(128, dtype=torch.float32, device=pos_tensor.device)
+    dim_t = 10000 ** (2 * (dim_t // 2) / 128)
+    x_embed = pos_tensor[:, :, 0] * scale
+    pos_x = x_embed[:, :, None] / dim_t
+    pos_x = torch.stack(
+        (pos_x[:, :, 0::2].sin(), pos_x[:, :, 1::2].cos()), dim=3
+    ).flatten(2)
+    if pos_tensor.size(-1) == 1:
+        pos = pos_x
+    elif pos_tensor.size(-1) == 2:
+        w_embed = pos_tensor[:, :, 1] * scale
+        pos_w = w_embed[:, :, None] / dim_t
+        pos_w = torch.stack(
+            (pos_w[:, :, 0::2].sin(), pos_w[:, :, 1::2].cos()), dim=3
+        ).flatten(2)
+
+        pos = torch.cat((pos_x, pos_w), dim=2)
+    else:
+        raise ValueError("Unknown pos_tensor shape(-1):{}".format(pos_tensor.size(-1)))
+    return pos
