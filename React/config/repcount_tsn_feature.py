@@ -203,7 +203,5 @@ optimizer_config = dict()
 lr_config = dict(policy="step", step=[contrastive_epoch + 7], gamma=0.1, by_epoch=True)
 
 # runtime settings
-work_dir = (
-    "/DATA/disk1/lizishi/react_out/repcount_20230214_with_null_class_iou_decay100"
-)
+work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230222_iou_decay100"
 output_config = dict(out=f"{work_dir}/results.json")
