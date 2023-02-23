@@ -231,12 +231,7 @@ class React(BaseTAPGenerator):
         video_gt = preprocess_groundtruth(video_gt_box, origin_snippet_num)
         for i, v_meta in enumerate(video_meta):
             video_gt[i]["video_name"] = v_meta["video_name"]
-        prepare_gt = preprocess_groundtruth(
-            video_gt_box,
-            origin_snippet_num,
-            to_tensor=True,
-            device=input_feature.device,
-        )
+            video_gt[i]["snippet_num"] = v_meta["origin_snippet_num"]
 
         query_vector = self.query_embed.weight
 
@@ -252,27 +247,6 @@ class React(BaseTAPGenerator):
             outputs_class, outputs_coord = self.output_refinement(
                 init_reference, inter_references, result
             )
-
-            # # calculate loss dict
-            # pred_iou = self.iou_predictor(result).sigmoid()
-            # pred_cen = self.cen_predictor(result).sigmoid()
-            # gt_ = gt_bbox[clip]
-            # pred = {"pred_logits": outputs_class[-1], "pred_seg": outputs_coord[-1], 'pred_iou': pred_iou[-1],
-            #         'pred_cen': pred_cen[-1]}
-            # indices = self.HungarianMatcher(pred, gt_)
-            #
-            # num_segs = sum(len(t["labels"]) for t in gt_)
-            # num_segs = torch.as_tensor([num_segs], dtype=torch.float, device=device)
-            # num_segs = torch.clamp(num_segs, min=1).item()
-            #
-            # loss_dict = self.loss_segs(pred, gt_, indices, num_segs)
-            #
-            # ce_loss = self.loss_labels(pred, gt_, indices, num_segs)
-            # loss_dict['ce_loss'] = ce_loss * self.coef_ce_now
-            #
-            # # IoU decay
-            # iou_decay = self.iou_decay(pred)
-            # loss_dict['iou_decay'] = iou_decay * self.coef_iou_decay
 
             pred_cls_out = outputs_class[-1]
             pred_cls_p = torch.sigmoid(pred_cls_out)

@@ -5,9 +5,9 @@ import pickle
 
 
 sub_dir = "test"
-ROOT_DIR = "/DATA/disk1/lizishi/LLSP/feature/{}".format(sub_dir)
+ROOT_DIR = "/DATA/disk1/lizishi/LLSP/feature-frame/{}".format(sub_dir)
 
-f = h5py.File("/DATA/disk1/lizishi/LLSP/feature/{}_rgb.h5".format(sub_dir), "w")
+f = h5py.File("/DATA/disk1/lizishi/LLSP/feature-frame/{}_rgb.h5".format(sub_dir), "w")
 video_list = os.listdir(ROOT_DIR)
 for video in video_list:
     video_name = video.replace(".pkl", "")
