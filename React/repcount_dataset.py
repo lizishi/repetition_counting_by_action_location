@@ -243,12 +243,6 @@ class RepCountDataset(data.Dataset):
 
         if not test_mode:
             self.training_clip_list, self.cls_list = self.prepare_training_clip()
-            # with open("debug.txt", "w") as f:
-            #     for i in self.training_clip_list:
-            #         f.write("{}".format(i))
-            # with open("debug_cls.txt", "w") as f:
-            #     for i in self.cls_list:
-            #         f.write("{}".format(i))
             self.real_len = len(self.training_clip_list)
         else:
             self.real_len = len(self.video_list)
