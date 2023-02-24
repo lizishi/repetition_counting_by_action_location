@@ -16,7 +16,7 @@ workflow = [("train", 1)]
 
 num_queries = 40
 num_negative_sample = 1
-clip_len = 64
+clip_len = 1024
 stride_rate = 0.25
 
 # include the contrastive epoch
@@ -51,9 +51,9 @@ model = dict(
 
 # dataset settings
 dataset_type = "RepCountDataset"
-data_root_train = "/DATA/disk1/lizishi/LLSP/feature/train_rgb.h5"
-data_root_val = "/DATA/disk1/lizishi/LLSP/feature/valid_rgb.h5"
-data_root_test = "/DATA/disk1/lizishi/LLSP/feature/test_rgb.h5"
+data_root_train = "/DATA/disk1/lizishi/LLSP/feature-frame/train_rgb.h5"
+data_root_val = "/DATA/disk1/lizishi/LLSP/feature-frame/valid_rgb.h5"
+data_root_test = "/DATA/disk1/lizishi/LLSP/feature-frame/test_rgb.h5"
 flow_root_train = None
 flow_root_val = None
 
@@ -144,14 +144,14 @@ data = dict(
     ),
     val_dataloader=dict(
         workers_per_gpu=4,
-        videos_per_gpu=64,
+        videos_per_gpu=16,
         pin_memory=True,
         shuffle=False,
         prefetch_factor=2,
     ),
     test_dataloader=dict(
         workers_per_gpu=4,
-        videos_per_gpu=64,
+        videos_per_gpu=16,
         pin_memory=True,
         shuffle=False,
         prefetch_factor=2,
@@ -203,5 +203,7 @@ optimizer_config = dict()
 lr_config = dict(policy="step", step=[contrastive_epoch + 7], gamma=0.1, by_epoch=True)
 
 # runtime settings
-work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230222_iou_decay100"
+work_dir = (
+    "/DATA/disk1/lizishi/react_out/repcount_20230224_frame_interval_1_clip_len_1024"
+)
 output_config = dict(out=f"{work_dir}/results.json")
