@@ -44,20 +44,21 @@ model = dict(
     coef_acedec=1.0,
     coef_quality=1.0,
     coef_iou_decay=100.0,
-    use_dab=True,
 )
 
 # dataset settings
 dataset_type = "RepCountDataset"
-data_root_train = "/DATA/disk1/lizishi/LLSP/feature/train_rgb.h5"
-data_root_val = "/DATA/disk1/lizishi/LLSP/feature/valid_rgb.h5"
-data_root_test = "/DATA/disk1/lizishi/LLSP/feature/test_rgb.h5"
+data_root_train = "/DATA/disk1/lizishi/LLSP/feature-frame/train_rgb.h5"
+data_root_val = "/DATA/disk1/lizishi/LLSP/feature-frame/valid_rgb.h5"
+data_root_test = "/DATA/disk1/lizishi/LLSP/feature-frame/test_rgb.h5"
 flow_root_train = None
 flow_root_val = None
 
 ann_file_train = "/DATA/disk1/lizishi/LLSP/annotation/train_new.csv"
 ann_file_val = "/DATA/disk1/lizishi/LLSP/annotation/valid_new.csv"
 ann_file_test = "/DATA/disk1/lizishi/LLSP/annotation/test_new.csv"
+
+train_frame_interval_list_aug = [1, 2, 4]
 
 test_pipeline = [
     dict(
@@ -130,14 +131,14 @@ data = dict(
     ),
     val_dataloader=dict(
         workers_per_gpu=4,
-        videos_per_gpu=64,
+        videos_per_gpu=16,
         pin_memory=True,
         shuffle=False,
         prefetch_factor=2,
     ),
     test_dataloader=dict(
         workers_per_gpu=4,
-        videos_per_gpu=64,
+        videos_per_gpu=16,
         pin_memory=True,
         shuffle=False,
         prefetch_factor=2,
@@ -171,6 +172,7 @@ data = dict(
         feature_type=feature_type,
         clip_len=clip_len,
         stride_rate=stride_rate,
+        frame_interval_list=train_frame_interval_list_aug,
     ),
 )
 
@@ -187,5 +189,7 @@ optimizer_config = dict()
 lr_config = dict(policy="step", step=[7], gamma=0.1, by_epoch=True)
 
 # runtime settings
-work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230215_dab_more_layer"
-output_config = dict(out=f"{work_dir}/{work_dir.split('/')[-1]}.json")
+work_dir = (
+    "/DATA/disk1/lizishi/react_out/repcount_20230224_frame_interval_1_clip_len_2048"
+)
+output_config = dict(out=f"{work_dir}/results.json")

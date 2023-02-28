@@ -20,7 +20,7 @@ from React.utill.temporal_box_producess import (
     se2ml,
     segment_giou,
 )
-from mmaction.models.builder import LOCALIZERS
+from mmaction.models.builder import LOCALIZERS, build_backbone
 from mmaction.models.localizers import BaseTAPGenerator
 
 # Mostly copied from DETR (https://github.com/facebookresearch/detr)
@@ -71,7 +71,7 @@ def sigmoid_focal_loss(
 class React(BaseTAPGenerator):
     def __init__(
         self,
-        input_feat_dim,  # the dimension of feature extracted by backbone
+        input_feat_dim=2048,  # the dimension of feature extracted by backbone
         feat_dim=512,  # the hidden dimsnsion of the React model
         n_head=8,  # the number of attention heads
         num_class=20,  # the category num of the dataset

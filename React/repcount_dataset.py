@@ -209,12 +209,11 @@ class RepCountDataset(data.Dataset):
         clip_len=128,
         class_num=2,
         stride_rate=0.75,
-        K=8,
-        contrastive_epoch=0,
         test_mode=False,
         feature_type="TSN",
         soft_nms_sigma=0.1,
         soft_nms_threshold=1e-4,
+        frame_interval_list=[1],
     ):
         self.ft_path = ft_path
         self.prop_file = prop_file
@@ -222,11 +221,9 @@ class RepCountDataset(data.Dataset):
         self.clip_len = clip_len
         self.stride_rate = stride_rate
         self.feature_type = feature_type
-        self.K = K
-        self.contrastive_epoch = contrastive_epoch
-        self.provide_contrastive_data = True if contrastive_epoch > 0 else False
         self.soft_nms_sigma = soft_nms_sigma
         self.soft_nms_threshold = soft_nms_threshold
+        self.frame_interval_list = frame_interval_list
 
         self.exclude_empty = exclude_empty
         self.epoch_multiplier = epoch_multiplier
@@ -311,80 +308,86 @@ class RepCountDataset(data.Dataset):
             vid_num_frames = video.num_frames
             vid = vid_full_name.split("/")[-1]
 
-            if self.feature_type == "TSN":
-                ft_tensor = self.feature_rgb[vid][:]
-                ft_tensor = torch.from_numpy(ft_tensor)
-            else:
-                ft_tensor = torch.load(os.path.join(self.ft_path, vid)).float()
+            for frame_interval in self.frame_interval_list:
+                if self.feature_type == "TSN":
+                    ft_tensor = self.feature_rgb[vid][:][::frame_interval]
+                    ft_tensor = torch.from_numpy(ft_tensor)
+                else:
+                    ft_tensor = torch.load(os.path.join(self.ft_path, vid)).float()
 
-            snippet_num = len(ft_tensor)
+                snippet_num = len(ft_tensor)
 
-            clips_num = (
-                ceil((snippet_num - self.clip_len) / (self.clip_len * self.stride_rate))
-                + 1
-            )
-            clips_ratio = self.clip_len / snippet_num
-
-            if clips_num <= 1:
-                result = {}
-                result["raw_feature"] = ft_tensor  # (clip_len, feature_dim)
-                result["gt_bbox"] = gt  # (gt_num, 3)
-                result["snippet_num"] = snippet_num  # the snippet number of the clip
-                result["video_name"] = vid
-                result[
-                    "origin_snippet_num"
-                ] = snippet_num  # the snippet number of the whole video
-                v_cls_list = []
-                for each_labels in gt:
-                    cls = int(each_labels[0])
-                    if cls not in v_cls_list:
-                        v_cls_list.append(cls)
-                        cls_list[cls].append(len(all_clip_list))
-                all_clip_list.append(result)
-                continue
-
-            # sample all data for train
-            for window_num in range(clips_num):
-                start_snippet = int(self.clip_len * self.stride_rate) * window_num
-
-                # finding matched gt
-                start_ratio = (clips_ratio * self.stride_rate) * window_num
-                end_ratio = start_ratio + clips_ratio
-
-                window_feature = ft_tensor[
-                    start_snippet : start_snippet + self.clip_len, :
-                ]
-
-                # find the matching gt in the windows
-                selected_gt = self.keep_gt_with_thershold(
-                    gt, start_ratio, end_ratio, thershold=0.75
+                clips_num = (
+                    ceil(
+                        (snippet_num - self.clip_len)
+                        / (self.clip_len * self.stride_rate)
+                    )
+                    + 1
                 )
+                clips_ratio = self.clip_len / snippet_num
 
-                if len(selected_gt) == 0:
+                if clips_num <= 1:
+                    result = {}
+                    result["raw_feature"] = ft_tensor  # (clip_len, feature_dim)
+                    result["gt_bbox"] = gt  # (gt_num, 3)
+                    result[
+                        "snippet_num"
+                    ] = snippet_num  # the snippet number of the clip
+                    result["video_name"] = vid
+                    result[
+                        "origin_snippet_num"
+                    ] = snippet_num  # the snippet number of the whole video
+                    v_cls_list = []
+                    for each_labels in gt:
+                        cls = int(each_labels[0])
+                        if cls not in v_cls_list:
+                            v_cls_list.append(cls)
+                            cls_list[cls].append(len(all_clip_list))
+                    all_clip_list.append(result)
                     continue
 
-                result = {}
-                # selected_gt = gt[index]
-                clip_gt = self.rescale_gt(
-                    selected_gt, start_ratio, snippet_num, len(window_feature)
-                )  # gt_num_i, 3
+                # sample all data for train
+                for window_num in range(clips_num):
+                    start_snippet = int(self.clip_len * self.stride_rate) * window_num
 
-                result["raw_feature"] = window_feature
-                result["snippet_num"] = len(
-                    window_feature
-                )  # the snippet number of the clip
-                result["gt_bbox"] = clip_gt  # (gt_num, 3)
-                result["video_name"] = vid
-                result[
-                    "origin_snippet_num"
-                ] = snippet_num  # the snippet number of the whole video
-                v_cls_list = []
-                for each_labels in clip_gt:
-                    cls = int(each_labels[0])
-                    if cls not in v_cls_list:
-                        v_cls_list.append(cls)
-                        cls_list[cls].append(len(all_clip_list))
-                all_clip_list.append(result)
+                    # finding matched gt
+                    start_ratio = (clips_ratio * self.stride_rate) * window_num
+                    end_ratio = start_ratio + clips_ratio
+
+                    window_feature = ft_tensor[
+                        start_snippet : start_snippet + self.clip_len, :
+                    ]
+
+                    # find the matching gt in the windows
+                    selected_gt = self.keep_gt_with_thershold(
+                        gt, start_ratio, end_ratio, thershold=0.75
+                    )
+
+                    if len(selected_gt) == 0:
+                        continue
+
+                    result = {}
+                    # selected_gt = gt[index]
+                    clip_gt = self.rescale_gt(
+                        selected_gt, start_ratio, snippet_num, len(window_feature)
+                    )  # gt_num_i, 3
+
+                    result["raw_feature"] = window_feature
+                    result["snippet_num"] = len(
+                        window_feature
+                    )  # the snippet number of the clip
+                    result["gt_bbox"] = clip_gt  # (gt_num, 3)
+                    result["video_name"] = vid
+                    result[
+                        "origin_snippet_num"
+                    ] = snippet_num  # the snippet number of the whole video
+                    v_cls_list = []
+                    for each_labels in clip_gt:
+                        cls = int(each_labels[0])
+                        if cls not in v_cls_list:
+                            v_cls_list.append(cls)
+                            cls_list[cls].append(len(all_clip_list))
+                    all_clip_list.append(result)
 
         return all_clip_list, cls_list
 
@@ -435,140 +438,6 @@ class RepCountDataset(data.Dataset):
         result["gt_bbox"] = gt_for_each_clips  # list: clip_num x [gt_num_i , 3]
         result["snippet_num"] = torch.tensor(snippet_num_list)
         return result
-
-    def sample_by_class(self, class_id):
-        instance_num = len(self.cls_list[class_id])
-        sample_instance_id = np.random.choice(instance_num, 1)[0]
-        sample = self.cls_list[class_id][sample_instance_id]
-
-        return sample
-
-    def sample_positive(self, class_id):
-        instance = self.sample_by_class(class_id)
-        pair_instances = self.training_clip_list[instance]
-        sample_segment_id = np.random.choice(len(pair_instances["gt_bbox"]), 1)[0]
-        sample_segment = pair_instances["gt_bbox"][sample_segment_id]
-        sample_segment = np.array(
-            [
-                sample_segment[1] - 0.5 * sample_segment[2],
-                sample_segment[1] + 0.5 * sample_segment[2],
-            ]
-        )
-        pair_feat = pair_instances["raw_feature"]
-        return pair_feat, sample_segment
-
-    def sample_same_class_negative(self, gt, k=4):
-        gt_mid = gt[1]
-        gt_len = gt[2]
-        gt_start = gt_mid - 0.5 * gt_len
-        gt_end = gt_mid + 0.5 * gt_len
-
-        # sample negative pair
-        if gt_len > 0.75:
-            # sample inner negative pair
-            random_shift_len = np.random.uniform(0.6, 0.9, k)
-            inner_positive_sample_len = (
-                1 - random_shift_len
-            ) * gt_len  # IoU< 0.4 will be treated as a negative sample
-            random_start_neg = (
-                np.random.uniform(0, random_shift_len) * gt_len + gt_start
-            )
-            random_end_neg = random_start_neg + inner_positive_sample_len
-            candidated = np.stack([random_start_neg, random_end_neg], axis=-1)
-        else:
-            candidated = []
-            # sample inner negative pair
-            random_shift_len = np.random.uniform(0.5, 0.8, k)
-            inner_positive_sample_len = (
-                1 - random_shift_len
-            ) * gt_len  # IoU< 0.5 will be treated as a negative sample
-            random_start_neg = (
-                np.random.uniform(0, random_shift_len) * gt_len + gt_start
-            )
-            random_end_neg = random_start_neg + inner_positive_sample_len
-            candidated.append(np.stack([random_start_neg, random_end_neg], axis=-1))
-
-            # # sample left outter negative pair
-            # random_inner_len_left = np.random.uniform(0.1, 0.5, k) * gt_len
-            # random_out_len_left = np.random.uniform(0.3, 0.5, k) * gt_len
-            #
-            # left_start = gt_start - random_out_len_left
-            # left_end = gt_start + random_inner_len_left
-            #
-            # left_sample = np.stack([left_start, left_end], axis=-1)
-            # left_sample = left_sample[left_sample[:, 0] >= 0]
-            # if len(left_sample) > 0:
-            #     candidated.append(left_sample)
-            #
-            # # sample right outter negative pair
-            # random_inner_len_right = np.random.uniform(0.1, 0.5, k) * gt_len
-            # random_out_len_right = np.random.uniform(0.3, 0.5, k) * gt_len
-            #
-            # right_start = gt_end - random_inner_len_right
-            # right_end = gt_end + random_out_len_right
-            #
-            # right_sample = np.stack([right_start, right_end], axis=-1)
-            # right_sample = right_sample[right_sample[:, 0] <= 1]
-            #
-            # if len(right_sample) > 0:
-            #     candidated.append(right_sample)
-
-            candidated = np.concatenate(candidated, axis=0)
-            choice_idx = np.random.choice(
-                list(range(len(candidated))), k, replace=False
-            )
-            candidated = candidated[choice_idx]
-
-        return candidated
-
-    def sample_different_class_negative(self, class_id):
-        while True:
-            sample_class_id = np.random.randint(0, len(type2label))
-            if sample_class_id == class_id:
-                continue
-            else:
-                break
-
-        instance = self.sample_by_class(sample_class_id)
-        pair_instances = self.training_clip_list[instance]
-        while True:
-            sample_segment_id = np.random.choice(len(pair_instances["gt_bbox"]), 1)[0]
-            sample_segment = pair_instances["gt_bbox"][sample_segment_id]
-            if sample_segment[0] != class_id:
-                break
-
-        sample_segment = np.array(
-            [
-                sample_segment[1] - 0.5 * sample_segment[2],
-                sample_segment[1] + 0.5 * sample_segment[2],
-            ]
-        )
-        pair_feat = pair_instances["raw_feature"]
-        return pair_feat, sample_segment
-
-    def sample_pair(self, gt, gt_len):
-        class_id = int(gt[0])
-
-        # sample positive pair
-        pos_feat, pos_sample_segment = self.sample_positive(class_id)
-        # rescale the segment coords because we will padding at the end of the sequence later.
-        pos_sample_segment = pos_sample_segment * (len(pos_feat) / self.clip_len)
-
-        # sample negative pair
-        neg_feat, neg_sample_segment = self.sample_different_class_negative(class_id)
-        neg_sample_segment = neg_sample_segment * (len(neg_feat) / self.clip_len)
-
-        # sample noise pair
-        candidated_segments = self.sample_same_class_negative(gt, k=self.K)
-        candidated_segments = candidated_segments * (gt_len / self.clip_len)
-
-        return (
-            pos_feat,
-            pos_sample_segment,
-            neg_feat,
-            neg_sample_segment,
-            candidated_segments,
-        )
 
     def dump_results(self, result, out=None):
         mmcv.dump(result, out)
@@ -653,46 +522,12 @@ class RepCountDataset(data.Dataset):
         if not self.test_mode:
             result = self.training_clip_list[real_index]
 
-            if self.provide_contrastive_data:
-                # preparing pair
-                gt = result["gt_bbox"]
-                gt_len = len(gt)
-                sample_gt = np.random.choice(gt_len, 1)[0]
-                sample_gt = gt[sample_gt]
-                (
-                    pos_feat,
-                    pos_sample_segment,
-                    neg_feat,
-                    neg_sample_segment,
-                    candidated_segments,
-                ) = self.sample_pair(sample_gt, len(result["raw_feature"]))
-                result["sample_gt"] = np.array(
-                    [
-                        sample_gt[1] - 0.5 * sample_gt[2],
-                        sample_gt[1] + 0.5 * sample_gt[2],
-                    ]
-                )
-                result["pos_feat"] = pos_feat
-                result["pos_sample_segment"] = pos_sample_segment
-                result["neg_feat"] = neg_feat
-                result["neg_sample_segment"] = neg_sample_segment
-                result["candidated_segments"] = candidated_segments
-            else:
-                null_data = np.zeros(1)
-                result["sample_gt"] = null_data
-                result["pos_feat"] = null_data
-                result["pos_sample_segment"] = null_data
-                result["neg_feat"] = null_data
-                result["neg_sample_segment"] = null_data
-                result["candidated_segments"] = null_data
-
             return self.pipeline(result)
 
         # get testing data (all clips for a videos)
         video = self.video_list[real_index]
 
         vid_full_name = video.id
-        vid_num_frames = video.num_frames
         vid = vid_full_name.split("/")[-1]
 
         if self.feature_type == "TSN":

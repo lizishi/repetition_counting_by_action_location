@@ -15,13 +15,11 @@ resume_from = None
 workflow = [("train", 1)]
 
 num_queries = 40
-num_negative_sample = 1
 clip_len = 2048
 stride_rate = 0.25
 
 # include the contrastive epoch
 total_epochs = 80
-contrastive_epoch = 0
 feature_type = "TSN"
 
 # model settings
@@ -37,7 +35,6 @@ model = dict(
     num_decoder_layers=4,
     num_queries=num_queries,
     clip_len=clip_len,
-    K=num_negative_sample,
     stride_rate=stride_rate,
     test_bg_thershold=0.0,
     coef_l1=5.0,
@@ -85,12 +82,6 @@ train_pipeline = [
             "raw_feature",
             "gt_bbox",
             "snippet_num",
-            "sample_gt",
-            "pos_feat",
-            "pos_sample_segment",
-            "neg_feat",
-            "neg_sample_segment",
-            "candidated_segments",
         ],
         meta_name="video_meta",
         meta_keys=["video_name", "origin_snippet_num"],
@@ -99,10 +90,6 @@ train_pipeline = [
         type="ToTensor",
         keys=[
             "snippet_num",
-            "sample_gt",
-            "pos_sample_segment",
-            "neg_sample_segment",
-            "candidated_segments",
         ],
     ),
     dict(
@@ -110,8 +97,6 @@ train_pipeline = [
         fields=[
             dict(key="gt_bbox", stack=True, cpu_only=True),
             dict(key="raw_feature", stack=True, cpu_only=True),
-            dict(key="pos_feat", stack=False, cpu_only=True),
-            dict(key="neg_feat", stack=False, cpu_only=True),
         ],
     ),
 ]
@@ -181,12 +166,10 @@ data = dict(
         prop_file=ann_file_train,
         ft_path=data_root_train,
         pipeline=train_pipeline,
-        K=num_negative_sample,
         epoch_multiplier=1,
         feature_type=feature_type,
         clip_len=clip_len,
         stride_rate=stride_rate,
-        contrastive_epoch=contrastive_epoch,
     ),
 )
 
@@ -200,10 +183,10 @@ evaluation = dict(interval=1, save_best="OBO", by_epoch=True, rule="greater")
 optimizer = dict(type="AdamW", lr=0.0002, weight_decay=0.0)
 optimizer_config = dict()
 # learning policy
-lr_config = dict(policy="step", step=[contrastive_epoch + 7], gamma=0.1, by_epoch=True)
+lr_config = dict(policy="step", step=[7], gamma=0.1, by_epoch=True)
 
 # runtime settings
 work_dir = (
-    "/DATA/disk1/lizishi/react_out/repcount_20230224_frame_interval_1_clip_len_2048"
+    "/DATA/disk1/lizishi/react_out/repcount_20230228_frame_interval_1_2_4_clip_len_1024"
 )
 output_config = dict(out=f"{work_dir}/results.json")
