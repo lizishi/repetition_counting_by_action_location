@@ -161,7 +161,6 @@ class React(BaseTAPGenerator):
         self.roi_extractor = ROIAlign(16, 0)
 
         self.cls_warmup_step = 0
-        self.contrastive_count = 0.0
 
         empty_weight = torch.ones(self.num_class)
         empty_weight[-1] = 0.1
@@ -320,27 +319,6 @@ class React(BaseTAPGenerator):
 
         device = input_feature.device
         query_vector = self.query_embed.weight
-
-        # compute the ace-enc loss.
-        if pos_feat[0].ndim > 1:  # provide contrastive data
-            pos_feat = nested_tensor_from_tensor_list(pos_feat, self.clip_len)
-            neg_feat = nested_tensor_from_tensor_list(neg_feat, self.clip_len)
-            contrast_input_feature = torch.cat(
-                [input_feature, pos_feat.tensors.cuda(), neg_feat.tensors.cuda()], dim=0
-            )  # 3xbatch, time, dim
-            contrast_sample_gt = torch.cat(
-                [
-                    sample_gt.unsqueeze(1),
-                    candidated_segments,
-                    pos_sample_segment.unsqueeze(1),
-                    neg_sample_segment.unsqueeze(1),
-                ],
-                dim=1,
-            ).cuda()  # bz, 1 + k(4) + 1 + 1
-            h = self.input_proj(contrast_input_feature)
-            contrastive_loss = self.loss_ace_enc(contrast_sample_gt, h, K=self.K)
-            self.contrastive_count = self.contrastive_count + 1
-            return {"loss_aceenc": contrastive_loss * self.coef_aceenc}
 
         input_feature = self.input_proj(input_feature)
         raw_feature.tensors = input_feature

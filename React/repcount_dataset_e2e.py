@@ -198,30 +198,27 @@ class VideoRecord:
 
 
 @DATASETS.register_module()
-class RepCountDataset(data.Dataset):
+class RepCountDatasetE2E(data.Dataset):
     def __init__(
         self,
         prop_file,
+        root_folder,
         pipeline,
         exclude_empty=True,
         epoch_multiplier=1,
         clip_len=128,
         class_num=2,
         stride_rate=0.75,
-        K=8,
-        contrastive_epoch=0,
         test_mode=False,
         soft_nms_sigma=0.1,
         soft_nms_threshold=1e-4,
         frame_interval_list=[1],
     ):
         self.prop_file = prop_file
+        self.root_folder = root_folder
         self.test_mode = test_mode
         self.clip_len = clip_len
         self.stride_rate = stride_rate
-        self.K = K
-        self.contrastive_epoch = contrastive_epoch
-        self.provide_contrastive_data = True if contrastive_epoch > 0 else False
         self.soft_nms_sigma = soft_nms_sigma
         self.soft_nms_threshold = soft_nms_threshold
         self.frame_interval_list = frame_interval_list
@@ -294,6 +291,13 @@ class RepCountDataset(data.Dataset):
 
         return gt
 
+    def get_safe_inds(self, frame_inds, total_frames):
+        safe_inds = frame_inds < total_frames
+        unsafe_inds = 1 - safe_inds
+        last_ind = np.max(safe_inds * frame_inds, axis=0)
+        new_inds = safe_inds * frame_inds + (unsafe_inds.T * last_ind).T
+        return new_inds
+
     def prepare_training_clip(self):
         all_clip_list = []
         cls_list = [[] for _ in range(self.class_num - 1)]
@@ -304,36 +308,34 @@ class RepCountDataset(data.Dataset):
 
             vid_full_name = video.id
             vid = vid_full_name.split("/")[-1]
+            total_frames = video.num_frames
 
             for frame_interval in self.frame_interval_list:
-                if self.feature_type == "TSN":
-                    ft_tensor = self.feature_rgb[vid][:][::frame_interval]
-                    ft_tensor = torch.from_numpy(ft_tensor)
-                else:
-                    ft_tensor = torch.load(os.path.join(self.ft_path, vid)).float()
-
-                snippet_num = len(ft_tensor)
-
+                ori_clip_len = self.clip_len * frame_interval
                 clips_num = (
                     ceil(
-                        (snippet_num - self.clip_len)
-                        / (self.clip_len * self.stride_rate)
+                        (total_frames - ori_clip_len)
+                        / (ori_clip_len * self.stride_rate)
                     )
                     + 1
                 )
-                clips_ratio = self.clip_len / snippet_num
+                clips_ratio = ori_clip_len / total_frames
+
+                result = {}
+                result["frame_dir"] = os.path.join(self.root_folder, vid)
+                result["filename_tmpl"] = "img_{:05d}.jpg"
+                result["modality"] = "RGB"
+                result["video_name"] = vid
+                result[
+                    "origin_snippet_num"
+                ] = total_frames  # the snippet number of the whole video
 
                 if clips_num <= 1:
-                    result = {}
-                    result["raw_feature"] = ft_tensor  # (clip_len, feature_dim)
+                    frame_num = total_frames // frame_interval
+                    result["frame_inds"] = np.arange(frame_num) * frame_interval + 1
                     result["gt_bbox"] = gt  # (gt_num, 3)
-                    result[
-                        "snippet_num"
-                    ] = snippet_num  # the snippet number of the clip
-                    result["video_name"] = vid
-                    result[
-                        "origin_snippet_num"
-                    ] = snippet_num  # the snippet number of the whole video
+                    result["clip_len"] = frame_num  # the snippet number of the clip
+                    result["num_clips"] = 1
                     v_cls_list = []
                     for each_labels in gt:
                         cls = int(each_labels[0])
@@ -345,15 +347,19 @@ class RepCountDataset(data.Dataset):
 
                 # sample all data for train
                 for window_num in range(clips_num):
-                    start_snippet = int(self.clip_len * self.stride_rate) * window_num
+                    start_snippet = int(ori_clip_len * self.stride_rate) * window_num
 
                     # finding matched gt
                     start_ratio = (clips_ratio * self.stride_rate) * window_num
                     end_ratio = start_ratio + clips_ratio
 
-                    window_feature = ft_tensor[
-                        start_snippet : start_snippet + self.clip_len, :
-                    ]
+                    frame_inds = (
+                        self.get_safe_inds(
+                            np.arange(self.clip_len) * frame_interval + start_snippet,
+                            total_frames,
+                        )
+                        + 1
+                    )
 
                     # find the matching gt in the windows
                     selected_gt = self.keep_gt_with_thershold(
@@ -363,21 +369,15 @@ class RepCountDataset(data.Dataset):
                     if len(selected_gt) == 0:
                         continue
 
-                    result = {}
                     # selected_gt = gt[index]
                     clip_gt = self.rescale_gt(
-                        selected_gt, start_ratio, snippet_num, len(window_feature)
+                        selected_gt, start_ratio, total_frames, ori_clip_len
                     )  # gt_num_i, 3
 
-                    result["raw_feature"] = window_feature
-                    result["snippet_num"] = len(
-                        window_feature
-                    )  # the snippet number of the clip
+                    result["frame_inds"] = frame_inds
+                    result["clip_len"] = self.clip_len  # the snippet number of the clip
                     result["gt_bbox"] = clip_gt  # (gt_num, 3)
-                    result["video_name"] = vid
-                    result[
-                        "origin_snippet_num"
-                    ] = snippet_num  # the snippet number of the whole video
+                    result["num_clips"] = 1
                     v_cls_list = []
                     for each_labels in clip_gt:
                         cls = int(each_labels[0])
@@ -389,32 +389,44 @@ class RepCountDataset(data.Dataset):
         return all_clip_list, cls_list
 
     def prepare_testing_clip(self, result):
-        features = result["raw_feature"]
-        snippet_num = len(features)
+        total_frames = result["origin_snippet_num"]
+        frame_interval = self.frame_interval_list[0]
+        ori_clip_len = self.clip_len * frame_interval
         gt = result["gt_bbox"]
 
         clips_num = (
-            ceil((snippet_num - self.clip_len) / (self.clip_len * self.stride_rate)) + 1
+            ceil((total_frames - ori_clip_len) / (ori_clip_len * self.stride_rate)) + 1
         )
-        clips_ratio = self.clip_len / snippet_num
+        clips_ratio = ori_clip_len / total_frames
 
-        clips_list = []
+        frame_inds_list = []
         gt_for_each_clips = []
 
         if clips_num <= 1:
-            result["raw_feature"] = [features]  # 1 x clip_len x feature_dim
+            frame_num = total_frames // frame_interval
+            result["frame_inds"] = (
+                np.arange(frame_num) * frame_interval + 1
+            )  # 1 x clip_len x feature_dim
             result["gt_bbox"] = [gt]  # 1 x gt_num x 3
-            result["snippet_num"] = torch.tensor([len(features)])
+            result["snippet_num"] = frame_num
+            result["clip_len"] = frame_num
+            result["num_clips"] = 1
             return result
 
         snippet_num_list = []
         # sample all data for test
         for window_num in range(clips_num):
             start_snippet = int(self.clip_len * self.stride_rate) * window_num
-            clips_list.append(
-                features[start_snippet : start_snippet + self.clip_len, :]
+            (
+                frame_inds_list.append(
+                    self.get_safe_inds(
+                        np.arange(self.clip_len) * frame_interval + start_snippet,
+                        total_frames,
+                    )
+                    + 1
+                )
             )
-            snippet_num_list.append(len(clips_list[-1]))
+            snippet_num_list.append(self.clip_len)
 
             # finding matched gt
             start_ratio = (clips_ratio * self.stride_rate) * window_num
@@ -427,13 +439,18 @@ class RepCountDataset(data.Dataset):
             )
 
             clip_gt = self.rescale_gt(
-                gt[index], start_ratio, snippet_num, len(clips_list[-1])
+                gt[index], start_ratio, total_frames, self.clip_len
             )  # gt_num_i, 3
             gt_for_each_clips.append(clip_gt)
 
-        result["raw_feature"] = clips_list  # clip_num, clip_len, feature_dim
-        result["gt_bbox"] = gt_for_each_clips  # list: clip_num x [gt_num_i , 3]
-        result["snippet_num"] = torch.tensor(snippet_num_list)
+        result["frame_inds"] = np.array(
+            frame_inds_list
+        ).flatten()  # clip_num, clip_len, feature_dim
+        result["gt_bbox"] = gt_for_each_clips
+        # list: clip_num x [gt_num_i , 3]
+        result["clip_len"] = len(result["frame_inds"])
+        result["snippet_num"] = snippet_num_list
+        result["num_clips"] = 1
         return result
 
     def dump_results(self, result, out=None):
@@ -513,6 +530,15 @@ class RepCountDataset(data.Dataset):
         }
 
     def __getitem__(self, index):
+        """
+        Args:
+            index: clip index
+
+        Return:
+            result: dict, include keys "frame_dir", "filename_tmpl",
+            "frame_inds", "modality", "video_name", "snippt_num",
+            "origin_snippet_num", "gt_bbox", "video_gt_bbox"
+        """
         real_index = index % self.real_len
 
         # if training, get training clip (any clips from any videos)
@@ -525,16 +551,18 @@ class RepCountDataset(data.Dataset):
 
         vid_full_name = video.id
         vid = vid_full_name.split("/")[-1]
+        total_frames = video.num_frames
 
         gt = self.gt_list[real_index]
 
         result = {}
+        result["frame_dir"] = os.path.join(self.root_folder, vid)
+        result["filename_tmpl"] = "img_{:05d}.jpg"
+        result["modality"] = "RGB"
         result["video_name"] = vid
-        result["origin_snippet_num"] = len(
-            ft_tensor
-        )  # The snippet number of the whole video
-        result["snippet_num"] = len(ft_tensor)  # The snippet number of the clip
-        result["raw_feature"] = ft_tensor
+        result[
+            "origin_snippet_num"
+        ] = total_frames  # The snippet number of the whole video
         result["gt_bbox"] = np.array(gt)
         result["video_gt_box"] = np.array(gt)
 

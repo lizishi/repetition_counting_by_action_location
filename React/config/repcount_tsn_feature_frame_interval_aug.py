@@ -190,6 +190,6 @@ lr_config = dict(policy="step", step=[7], gamma=0.1, by_epoch=True)
 
 # runtime settings
 work_dir = (
-    "/DATA/disk1/lizishi/react_out/repcount_20230224_frame_interval_1_clip_len_2048"
+    "/DATA/disk1/lizishi/react_out/repcount_20230224_frame_interval_1_2__clip_len_2048"
 )
 output_config = dict(out=f"{work_dir}/results.json")

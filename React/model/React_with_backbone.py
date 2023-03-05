@@ -68,7 +68,7 @@ def sigmoid_focal_loss(
 
 
 @LOCALIZERS.register_module()
-class React(BaseTAPGenerator):
+class ReactBackbone(BaseTAPGenerator):
     def __init__(
         self,
         backbone=None,
@@ -97,6 +97,7 @@ class React(BaseTAPGenerator):
     ):
         super().__init__()
 
+        self.input_feat_dim = input_feat_dim
         self.feat_dim = feat_dim
         self.num_class = num_class
         self.clip_len = clip_len
@@ -125,7 +126,7 @@ class React(BaseTAPGenerator):
             self.query_embed = nn.Embedding(num_queries, self.feat_dim * 2)
 
         self.backbone = build_backbone(backbone)
-
+        self.pool = nn.AdaptiveAvgPool2d(1)
         self.transformer = Transformer(
             num_class=num_class,
             d_model=feat_dim,
@@ -172,16 +173,10 @@ class React(BaseTAPGenerator):
 
     def forward(
         self,
-        raw_feature,
+        imgs,
         gt_bbox=None,
         video_gt_box=None,
-        snippet_num=None,
-        sample_gt=None,
-        pos_feat=None,
-        pos_sample_segment=None,
-        neg_feat=None,
-        neg_sample_segment=None,
-        candidated_segments=None,
+        clip_len=None,
         video_meta=None,
         return_loss=True,
     ):
@@ -190,41 +185,42 @@ class React(BaseTAPGenerator):
         if return_loss:
             return self.forward_train(
                 gt_bbox,
-                snippet_num,
-                raw_feature,
+                clip_len,
+                imgs,
                 video_gt_box,
-                sample_gt,
-                pos_feat,
-                pos_sample_segment,
-                neg_feat,
-                neg_sample_segment,
-                candidated_segments,
                 video_meta,
             )
 
         else:
-            return self.forward_test(
-                gt_bbox, snippet_num, raw_feature, video_gt_box, video_meta
-            )
+            return self.forward_test(gt_bbox, clip_len, imgs, video_gt_box, video_meta)
 
     @torch.no_grad()
-    def forward_test(self, gt_bbox, snippet_num, raw_feature, video_gt_box, video_meta):
+    def forward_test(self, gt_bbox, clip_len, imgs, video_gt_box, video_meta):
         # if trained with clips, stack all clip into the batch dimension, we pad the batch with the max number of clips in the batch.
-        if isinstance(raw_feature[0], list):
-            raw_feature = nested_tensor_from_tensor_list(
-                raw_feature, self.clip_len, snippet_num
-            )
-        else:
-            raw_feature = nested_tensor_from_tensor_list(raw_feature)
+        new_imgs = []
+        for img in imgs:
+            img = img.permute(1, 0, 2, 3).cuda()
+            t, c, h, w = img.shape
+            input_feature = self.backbone(img)
+            input_feature = self.pool(input_feature)
+            if np.prod(input_feature.shape) // self.input_feat_dim <= self.clip_len:
+                input_feature = input_feature.view(1, -1, self.input_feat_dim)
+            else:
+                input_feature = input_feature.view(
+                    -1, self.clip_len, self.input_feat_dim
+                )
+            new_imgs.append(input_feature)
 
-        masks = raw_feature.mask.cuda()
-        input_feature = raw_feature.tensors.cuda()
-        snippet_num = raw_feature.snippet_num.cuda()
+        imgs = nested_tensor_from_tensor_list(new_imgs, self.clip_len, clip_len)
+
+        masks = imgs.mask.cuda()
+        input_feature = imgs.tensors.cuda()
+        clip_len = imgs.snippet_num.cuda()
         origin_snippet_num = [each["origin_snippet_num"] for each in video_meta]
 
         input_feature = self.input_proj(input_feature)
-        raw_feature.tensors = input_feature
-        raw_feature.mask = masks
+        imgs.tensors = input_feature
+        imgs.mask = masks
 
         video_pred = [
             [[] for class_i in range(self.num_class)] for batch_i in range(len(gt_bbox))
@@ -244,7 +240,7 @@ class React(BaseTAPGenerator):
                 input_feature[:, clip, :, :],
                 masks[:, clip, :],
                 query=query_vector,
-                snippet_num=snippet_num[:, clip],
+                snippet_num=clip_len[:, clip],
             )  # bz, Lq, dim
 
             outputs_class, outputs_coord = self.output_refinement(
@@ -260,13 +256,13 @@ class React(BaseTAPGenerator):
             pred_cen = self.cen_predictor(result).sigmoid()[-1]
             pred_cls_p = pred_cls_p * pred_iou * pred_cen
 
-            clip_mask = raw_feature.clip_mask[:, clip]
+            clip_mask = imgs.clip_mask[:, clip]
 
             clip_pred = postprocessing_test_format(
                 pred_seg,
                 pred_cls_p,
                 self.num_class,
-                snippet_num=snippet_num[:, clip],
+                snippet_num=clip_len[:, clip],
                 whole_video_snippet_num=origin_snippet_num,
                 clip_len=self.clip_len,
                 clip_idx=clip,
@@ -300,57 +296,30 @@ class React(BaseTAPGenerator):
     def forward_train(
         self,
         gt_bbox,
-        snippet_num,
-        raw_feature,
+        clip_len,
+        imgs,
         video_gt_box,
-        sample_gt,
-        pos_feat,
-        pos_sample_segment,
-        neg_feat,
-        neg_sample_segment,
-        candidated_segments,
         video_meta,
     ):
-        raw_feature = nested_tensor_from_tensor_list(
-            raw_feature, self.clip_len
+        imgs = nested_tensor_from_tensor_list(
+            imgs, self.clip_len
         )  # num_videos, clip_len, dim
-        snippet_num = (
-            snippet_num.cuda()
+        clip_len = (
+            clip_len.cuda()
         )  # used for calculated attention offset, which is the snippet num after downsampling
 
-        masks = raw_feature.mask.cuda()
-        input_feature = raw_feature.tensors.cuda()
-
+        masks = imgs.mask.cuda()
+        input_feature = imgs.tensors.cuda()
+        bz, t, c, h, w = input_feature.shape
         device = input_feature.device
+        input_feature = self.backbone(input_feature.view(-1, c, h, w))
+        input_feature = self.pool(input_feature).view(input_feature.shape[0], -1)
+        input_feature = input_feature.view(bz, t, -1)
         query_vector = self.query_embed.weight
-
-        # compute the ace-enc loss.
-        if pos_feat[0].ndim > 1:  # provide contrastive data
-            pos_feat = nested_tensor_from_tensor_list(pos_feat, self.clip_len)
-            neg_feat = nested_tensor_from_tensor_list(neg_feat, self.clip_len)
-            contrast_input_feature = torch.cat(
-                [input_feature, pos_feat.tensors.cuda(), neg_feat.tensors.cuda()], dim=0
-            )  # 3xbatch, time, dim
-            contrast_sample_gt = torch.cat(
-                [
-                    sample_gt.unsqueeze(1),
-                    candidated_segments,
-                    pos_sample_segment.unsqueeze(1),
-                    neg_sample_segment.unsqueeze(1),
-                ],
-                dim=1,
-            ).cuda()  # bz, 1 + k(4) + 1 + 1
-            h = self.input_proj(contrast_input_feature)
-            contrastive_loss = self.loss_ace_enc(contrast_sample_gt, h, K=self.K)
-            self.contrastive_count = self.contrastive_count + 1
-            return {"loss_aceenc": contrastive_loss * self.coef_aceenc}
-
         input_feature = self.input_proj(input_feature)
-        raw_feature.tensors = input_feature
-        raw_feature.mask = masks
 
         result, init_reference, inter_references, memory, tgt = self.transformer(
-            input_feature, masks, query_vector, snippet_num=snippet_num
+            input_feature, masks, query_vector, snippet_num=clip_len
         )  # bz, Lq, dim
 
         outputs_class, outputs_coord = self.output_refinement(
@@ -368,7 +337,7 @@ class React(BaseTAPGenerator):
         }
 
         gt_bbox = preprocess_groundtruth(
-            gt_bbox, original_len=snippet_num, to_tensor=True, device=device
+            gt_bbox, original_len=clip_len, to_tensor=True, device=device
         )
         indices = self.HungarianMatcher(pred, gt_bbox)
 
@@ -388,7 +357,7 @@ class React(BaseTAPGenerator):
             memory,
             gt_bbox,
             memory_key_padding_mask=masks,
-            snippet_num=snippet_num,
+            snippet_num=clip_len,
         )
         loss_dict["gt_loss"] = gt_loss * self.coef_acedec
 
