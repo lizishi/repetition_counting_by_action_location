@@ -27,9 +27,16 @@ def find_match_gt(seg_instance, gt):
     # gt : [N_gt, 3(start_time/frame, end_time,class)]
     seg_instance = seg_instance.unsqueeze(1)
     gt = gt.unsqueeze(0)
-    inter = torch.max(torch.zeros(1, device=gt.device),
-                      torch.min(gt[:, :, 1], seg_instance[:, :, 1]) - torch.max(gt[:, :, 0], seg_instance[:, :, 0]))
-    union = (gt[:, :, 1] - gt[:, :, 0]) + (seg_instance[:, :, 1] - seg_instance[:, :, 0]) - inter
+    inter = torch.max(
+        torch.zeros(1, device=gt.device),
+        torch.min(gt[:, :, 1], seg_instance[:, :, 1])
+        - torch.max(gt[:, :, 0], seg_instance[:, :, 0]),
+    )
+    union = (
+        (gt[:, :, 1] - gt[:, :, 0])
+        + (seg_instance[:, :, 1] - seg_instance[:, :, 0])
+        - inter
+    )
     iou = inter / union
 
     idx = torch.argmax(iou, dim=-1)
@@ -41,7 +48,13 @@ def stack_predicted_data(video_pred):
     stack_data = []
     for class_id in range(len(video_pred)):
         if len(video_pred[class_id]) > 0:
-            data_i = np.concatenate([video_pred[class_id], np.ones((len(video_pred[class_id]), 1)) * class_id], axis=-1)
+            data_i = np.concatenate(
+                [
+                    video_pred[class_id],
+                    np.ones((len(video_pred[class_id]), 1)) * class_id,
+                ],
+                axis=-1,
+            )
             stack_data.append(data_i)
 
     if len(stack_data) == 0:
@@ -64,12 +77,14 @@ def nms(vid_dets, thresh):
         start = dets[:, 0]
         end = dets[:, 1]
         scores = dets[:, 2]
-        areas = (end - start)
+        areas = end - start
         order = scores.argsort()[::-1]
         while order.size > 0:
             i = order[0]
             keep = dets[i]
-            out[int(keep[3])] = np.concatenate([out[int(keep[3])], keep[None, :3]], axis=0)
+            out[int(keep[3])] = np.concatenate(
+                [out[int(keep[3])], keep[None, :3]], axis=0
+            )
             xx1 = np.maximum(start[i], start[order[1:]])
             xx2 = np.minimum(end[i], end[order[1:]])
             inter = np.maximum(0.0, xx2 - xx1)
@@ -80,7 +95,7 @@ def nms(vid_dets, thresh):
         vid_dets[vid] = out
 
 
-def softnms_v2(vid_dets, sigma=0.5, top_k=1000, score_threshold=0.):
+def softnms_v2(vid_dets, sigma=0.5, top_k=1000, score_threshold=0.0):
     for vid, pred_out in enumerate(vid_dets):
         out = [np.zeros((0, 3)) for _ in range(len(vid_dets[0]))]
 
@@ -111,7 +126,7 @@ def softnms_v2(vid_dets, sigma=0.5, top_k=1000, score_threshold=0.):
             duration = _tend - _tstart
             tmp_width = max(top_end - top_start, 1e-5)
             iou = intersection / (tmp_width + duration - intersection)
-            scales = np.exp(-iou ** 2 / sigma)
+            scales = np.exp(-(iou**2) / sigma)
             tscore[undone_mask] *= scales
             undone_mask[tscore < score_threshold] = False
 
@@ -120,13 +135,28 @@ def softnms_v2(vid_dets, sigma=0.5, top_k=1000, score_threshold=0.):
         out_score = tscore[done_mask]
         out_cls = tcls[done_mask]
         for i in range(len(out_cls)):
-            out[int(out_cls[i])] = np.concatenate([out[int(out_cls[i])], np.array([[out_start[i], out_end[i], out_score[i]]])], axis=0)
+            out[int(out_cls[i])] = np.concatenate(
+                [
+                    out[int(out_cls[i])],
+                    np.array([[out_start[i], out_end[i], out_score[i]]]),
+                ],
+                axis=0,
+            )
 
         vid_dets[vid] = out
 
 
-def postprocessing_test_format(output, pred_prob, cls_num, snippet_num, whole_video_snippet_num, clip_len, clip_idx, stride_rate,
-                               threshold=0.1):
+def postprocessing_test_format(
+    output,
+    pred_prob,
+    cls_num,
+    snippet_num,
+    whole_video_snippet_num,
+    clip_len,
+    clip_idx,
+    stride_rate,
+    threshold=0.1,
+):
     # predicte results for all clip and re-normalized all the coordinates into the whole video coordinates
     # we predicted all the clip results parallelly for a batch of videos. We pad the number of clip for each video to the max number in the
     # batch of video, and parallelly predict the clip at the same location for the batch.
@@ -150,7 +180,9 @@ def postprocessing_test_format(output, pred_prob, cls_num, snippet_num, whole_vi
     prob = prob.cpu().numpy()
     pred_idx = pred_idx.cpu().numpy()
 
-    for v_out, v_pred_idx, v_pred_prob, v_clip_ratio, v_start_ratio in zip(output, pred_idx, prob, validated_clip_ratio, start_ratio):
+    for v_out, v_pred_idx, v_pred_prob, v_clip_ratio, v_start_ratio in zip(
+        output, pred_idx, prob, validated_clip_ratio, start_ratio
+    ):
         det_result = []
 
         # the predicted results in the range of [0,1]
@@ -181,7 +213,9 @@ def postprocessing_test_format(output, pred_prob, cls_num, snippet_num, whole_vi
             seg_end = seg_end[not_bg_idx]
             prob_left = v_pred_prob[cls_pred_idx][not_bg_idx, None]
 
-            cls_out = np.concatenate([seg_start, seg_end, prob_left], axis=-1)  # (N_action, start, end, probability)
+            cls_out = np.concatenate(
+                [seg_start, seg_end, prob_left], axis=-1
+            )  # (N_action, start, end, probability)
             det_result.append(cls_out)
 
         batch_pred.append(det_result)
@@ -194,18 +228,31 @@ def segment_iou(segment1, segment2):
     assert (segment2[..., 1] >= segment2[..., 0]).all()
 
     if segment1.ndim == 2 and segment2.ndim == 2:
-        inter = torch.max(torch.zeros(1, device=segment1.device),
-                          torch.min(segment1[:, None, 1], segment2[None, :, 1]) - torch.max(segment1[:, None, 0], segment2[None, :, 0]))
-        union = (segment1[:, None, 1] - segment1[:, None, 0]) + (segment2[None, :, 1] - segment2[None, :, 0]) - inter
+        inter = torch.max(
+            torch.zeros(1, device=segment1.device),
+            torch.min(segment1[:, None, 1], segment2[None, :, 1])
+            - torch.max(segment1[:, None, 0], segment2[None, :, 0]),
+        )
+        union = (
+            (segment1[:, None, 1] - segment1[:, None, 0])
+            + (segment2[None, :, 1] - segment2[None, :, 0])
+            - inter
+        )
         iou = inter / (union + 1e-6)
     elif segment1.ndim == 3 and segment2.ndim == 3:
-        inter = torch.max(torch.zeros(1, device=segment1.device),
-                          torch.min(segment1[:, :, None, 1], segment2[:, None, :, 1]) - torch.max(segment1[:, :, None, 0],
-                                                                                                  segment2[:, None, :, 0]))
-        union = (segment1[:, :, None, 1] - segment1[:, :, None, 0]) + (segment2[:, None, :, 1] - segment2[:, None, :, 0]) - inter
+        inter = torch.max(
+            torch.zeros(1, device=segment1.device),
+            torch.min(segment1[:, :, None, 1], segment2[:, None, :, 1])
+            - torch.max(segment1[:, :, None, 0], segment2[:, None, :, 0]),
+        )
+        union = (
+            (segment1[:, :, None, 1] - segment1[:, :, None, 0])
+            + (segment2[:, None, :, 1] - segment2[:, None, :, 0])
+            - inter
+        )
         iou = inter / (union + 1e-6)
     else:
-        raise Exception('not implement for this shape, please check.')
+        raise Exception("not implement for this shape, please check.")
     return iou
 
 
@@ -214,26 +261,43 @@ def segment_giou(segment1, segment2):
     assert (segment2[..., 1] >= segment2[..., 0]).all()
 
     if segment1.ndim == 2 and segment2.ndim == 2:
-        inter = torch.max(torch.zeros(1, device=segment1.device),
-                          torch.min(segment1[:, None, 1], segment2[None, :, 1]) - torch.max(segment1[:, None, 0], segment2[None, :, 0]))
-        union = (segment1[:, None, 1] - segment1[:, None, 0]) + (segment2[None, :, 1] - segment2[None, :, 0]) - inter
+        inter = torch.max(
+            torch.zeros(1, device=segment1.device),
+            torch.min(segment1[:, None, 1], segment2[None, :, 1])
+            - torch.max(segment1[:, None, 0], segment2[None, :, 0]),
+        )
+        union = (
+            (segment1[:, None, 1] - segment1[:, None, 0])
+            + (segment2[None, :, 1] - segment2[None, :, 0])
+            - inter
+        )
         iou = inter / (union + 1e-6)
 
-        area = torch.max(segment1[:, None, 1], segment2[None, :, 1]) - torch.min(segment1[:, None, 0], segment2[None, :, 0])
+        area = torch.max(segment1[:, None, 1], segment2[None, :, 1]) - torch.min(
+            segment1[:, None, 0], segment2[None, :, 0]
+        )
         giou = iou - (area - union) / (area + 1e-6)
-
 
     elif segment1.ndim == 3 and segment2.ndim == 3:
-        inter = torch.max(torch.zeros(1, device=segment1.device),
-                          torch.min(segment1[:, :, None, 1], segment2[:, None, :, 1]) - torch.max(segment1[:, :, None, 0],
-                                                                                                  segment2[:, None, :, 0]))
-        union = (segment1[:, :, None, 1] - segment1[:, :, None, 0]) + (segment2[:, None, :, 1] - segment2[:, None, :, 0]) - inter + 1e-5
+        inter = torch.max(
+            torch.zeros(1, device=segment1.device),
+            torch.min(segment1[:, :, None, 1], segment2[:, None, :, 1])
+            - torch.max(segment1[:, :, None, 0], segment2[:, None, :, 0]),
+        )
+        union = (
+            (segment1[:, :, None, 1] - segment1[:, :, None, 0])
+            + (segment2[:, None, :, 1] - segment2[:, None, :, 0])
+            - inter
+            + 1e-5
+        )
         iou = inter / (union + 1e-6)
 
-        area = torch.max(segment1[:, :, None, 1], segment2[:, None, :, 1]) - torch.min(segment1[:, :, None, 0], segment2[:, None, :, 0])
+        area = torch.max(segment1[:, :, None, 1], segment2[:, None, :, 1]) - torch.min(
+            segment1[:, :, None, 0], segment2[:, None, :, 0]
+        )
         giou = iou - (area - union) / (area + 1e-6)
     else:
-        raise Exception('not implement for this shape, please check.')
+        raise Exception("not implement for this shape, please check.")
     return giou
 
 
@@ -266,9 +330,9 @@ def preprocess_groundtruth(gt, original_len=None, to_tensor=False, device=None):
         # convert the gt type from mid-length to start-end
         v_gt_start_end = mid_dis2start_end(v_vt[:, 1:])
         v_gt_start = v_gt_start_end[:, 0, None]
-        v_gt_start[v_gt_start < 0] = 0.
+        v_gt_start[v_gt_start < 0] = 0.0
         v_gt_end = v_gt_start_end[:, 1, None]
-        v_gt_end[v_gt_end >= 1] = 1.
+        v_gt_end[v_gt_end >= 1] = 1.0
         # set one video's gt label
         gt_data = np.concatenate([v_gt_start, v_gt_end], axis=-1)
         if to_tensor:
@@ -277,7 +341,7 @@ def preprocess_groundtruth(gt, original_len=None, to_tensor=False, device=None):
             annotation["length"] = torch.tensor((gt_len), device=device)
         else:
             annotation["segments"] = gt_data
-            annotation["labels"] = (v_vt[:, 0])
-            annotation["length"] = (gt_len)
+            annotation["labels"] = v_vt[:, 0]
+            annotation["length"] = gt_len
         gt_out.append(annotation)
     return gt_out
