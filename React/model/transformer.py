@@ -11,7 +11,7 @@ from torch.nn.init import constant_, xavier_uniform_
 
 from React.model.grid_sample1d import GridSample1d
 from React.utill.misc import inverse_sigmoid
-from React.utill.temporal_box_producess import ml2se, segment_iou
+from React.utill.temporal_box_producess import ml2se, segment_iou, get_reference_points
 
 
 class MLP(nn.Module):
@@ -48,10 +48,12 @@ class Transformer(nn.Module):
         return_intermediate_dec=False,
         use_dab=False,
         no_sine_embed=False,
+        use_enc_anchor=False,
     ):
         super().__init__()
 
         self.return_intermediate_dec = return_intermediate_dec
+        self.use_enc_anchor = use_enc_anchor
 
         encoder_layer = TransformerEncoderLayer(
             d_model,
@@ -66,6 +68,12 @@ class Transformer(nn.Module):
         self.encoder = TransformerEncoder(
             encoder_layer, num_encoder_layers, encoder_norm
         )
+
+        if self.use_enc_anchor:
+            self.enc_output = nn.Linear(d_model, d_model)
+            self.enc_output_norm = nn.LayerNorm(d_model)
+        self.enc_out_class_embed = None
+        self.enc_out_bbox_embed = None
 
         decoder_layer = TransformerDecoderLayer(
             d_model,
@@ -91,6 +99,7 @@ class Transformer(nn.Module):
         self.nhead = nhead
         self.num_class = num_class
         self.use_dab = use_dab
+        self.use_enc_anchor = use_enc_anchor
 
         self._reset_parameters()
 
@@ -140,7 +149,7 @@ class Transformer(nn.Module):
 
         if pos_embeds is not None:
             pos_embeds = pos_embeds.permute(2, 0, 1)
-        srcs = self.encoder(
+        memory = self.encoder(
             src=srcs,
             pos=pos_embeds,
             src_key_padding_mask=masks,
@@ -148,9 +157,46 @@ class Transformer(nn.Module):
             snippet_num=snippet_num,
         )
 
+        query = query.unsqueeze(1).repeat(1, srcs.shape[1], 1)  # L_max, bz, dim
+        if self.use_enc_anchor:
+            enc_memory = self.enc_output_norm(self.enc_output(memory))  # L_max, bz, dim
+            reference_point = (
+                get_reference_points(enc_memory.shape[0], enc_memory.device)
+                .permute(1, 0)
+                .unsqueeze(1)
+                .repeat(1, enc_memory.shape[1], 1)
+            )  # L_max, 1
+            enc_outputs_class_unselected = self.enc_out_class_embed(
+                enc_memory
+            )  # L_max, bz, num_class
+            enc_outputs_coord_unselected = self.enc_out_bbox_embed(
+                enc_memory
+            )  # (L_max, bz, 2) unsigmoid
+            enc_outputs_coord_unselected[..., :1] += reference_point
+
+            topk = query.shape[0]
+            topk_proposals = torch.topk(
+                enc_outputs_class_unselected[..., 0], topk, dim=0
+            )[
+                1
+            ]  # bs, nq
+
+            # gather segment proposals
+            context_segment_undetach = torch.gather(
+                enc_outputs_coord_unselected,
+                0,
+                topk_proposals.unsqueeze(-1).repeat(1, 1, 2),
+            )  # nq, bs, 2  unsigmoid
+            # gather context embedding
+            context_embed_undetached = torch.gather(
+                enc_memory, 0, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
+            )  # nq, bs, dim
+            context_embed = context_embed_undetached.detach()
+            query[:, :, : self.d_model] = context_embed
+
         hs, init_refpoint, ref_point, tgt = self.decoder(
             query,
-            srcs,
+            memory,
             tgt_key_padding_mask=query_mask,
             valid_ratio=valid_ratios,
             memory_key_padding_mask=masks,
@@ -161,7 +207,22 @@ class Transformer(nn.Module):
         else:
             hs = hs.transpose(0, 1)
 
-        return hs, init_refpoint, ref_point, srcs.transpose(0, 1), tgt
+        if self.use_enc_anchor:
+            enc_context = context_embed_undetached.permute(1, 0, 2)
+            enc_reference = context_segment_undetach.permute(1, 0, 2).sigmoid()
+        else:
+            enc_context = None
+            enc_reference = None
+
+        return (
+            hs,
+            init_refpoint,
+            ref_point,
+            srcs.transpose(0, 1),
+            tgt,
+            enc_context,
+            enc_reference,
+        )
 
 
 class TransformerEncoder(nn.Module):
@@ -170,19 +231,6 @@ class TransformerEncoder(nn.Module):
         self.layers = _get_clones(encoder_layer, num_layers)
         self.num_layers = num_layers
         self.norm = norm
-
-    @staticmethod
-    def get_reference_points(temporal_dim_len, valid_ratios, device):
-        # temporal_dim_len： the shape of temporal dimension after padding
-        ref = torch.linspace(
-            0.5,
-            temporal_dim_len - 0.5,
-            temporal_dim_len,
-            dtype=torch.float32,
-            device=device,
-        )
-        ref = ref[None] / temporal_dim_len  # (1, temporal_dim_len)
-        return ref  # (1, temporal_dim_len)
 
     def forward(
         self,
@@ -195,7 +243,7 @@ class TransformerEncoder(nn.Module):
     ):
         output = src
         reference_points = (
-            self.get_reference_points(src.shape[0], valid_ratio, device=src.device)
+            get_reference_points(src.shape[0], device=src.device)
             .expand(src.shape[1], -1)
             .unsqueeze(-1)
         )
@@ -331,16 +379,14 @@ class TransformerDecoder(nn.Module):
         valid_ratio=None,
         snippet_num=None,
     ):
-        bz = memory.shape[1]
-        content_query = tgt[:, : self.d_model]
-        content_query = content_query.unsqueeze(0).expand(bz, -1, -1).transpose(0, 1)
+        content_query = tgt[..., : self.d_model]
         output = content_query
         intermediate = []
         intermediate_reference_points = []
 
-        position_query = tgt[:, self.d_model :]
+        position_query = tgt[:, 0, self.d_model :]
         if self.use_dab:
-            reference_point = position_query.sigmoid().unsqueeze(0).expand(bz, -1, -1)
+            reference_point = position_query.sigmoid()
         else:
             reference_point = self.ref_point_head(position_query).sigmoid()
         init_reference_point = reference_point

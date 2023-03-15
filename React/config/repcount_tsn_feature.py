@@ -15,8 +15,9 @@ resume_from = None
 workflow = [("train", 1)]
 
 num_queries = 40
-clip_len = 2048
+clip_len = 512
 stride_rate = 0.25
+frame_interval_list = [1]
 
 # include the contrastive epoch
 total_epochs = 80
@@ -51,12 +52,16 @@ dataset_type = "RepCountDataset"
 data_root_train = "/DATA/disk1/lizishi/LLSP/feature-frame/train_rgb.h5"
 data_root_val = "/DATA/disk1/lizishi/LLSP/feature-frame/valid_rgb.h5"
 data_root_test = "/DATA/disk1/lizishi/LLSP/feature-frame/test_rgb.h5"
+# data_root_test = (
+#     "/DATA/disk1/shangqiuyan/repnew/dataset/UCF/feature-frame-h5/valid_rgb.h5"
+# )
 flow_root_train = None
 flow_root_val = None
 
 ann_file_train = "/DATA/disk1/lizishi/LLSP/annotation/train_new.csv"
 ann_file_val = "/DATA/disk1/lizishi/LLSP/annotation/valid_new.csv"
 ann_file_test = "/DATA/disk1/lizishi/LLSP/annotation/test_new.csv"
+# ann_file_test = "/DATA/disk1/shangqiuyan/repnew/dataset/UCF/annval/valsum.csv"
 
 test_pipeline = [
     dict(
@@ -150,6 +155,7 @@ data = dict(
         clip_len=clip_len,
         stride_rate=stride_rate,
         feature_type=feature_type,
+        frame_interval_list=frame_interval_list,
     ),
     val=dict(
         type=dataset_type,
@@ -160,6 +166,7 @@ data = dict(
         clip_len=clip_len,
         stride_rate=stride_rate,
         feature_type=feature_type,
+        frame_interval_list=frame_interval_list,
     ),
     train=dict(
         type=dataset_type,
@@ -170,6 +177,7 @@ data = dict(
         feature_type=feature_type,
         clip_len=clip_len,
         stride_rate=stride_rate,
+        frame_interval_list=frame_interval_list,
     ),
 )
 
@@ -187,6 +195,6 @@ lr_config = dict(policy="step", step=[7], gamma=0.1, by_epoch=True)
 
 # runtime settings
 work_dir = (
-    "/DATA/disk1/lizishi/react_out/repcount_20230228_frame_interval_1_2_4_clip_len_1024"
+    "/DATA/disk1/lizishi/react_out/repcount_20230315_feature_dim_256_clip_len_512"
 )
 output_config = dict(out=f"{work_dir}/results.json")

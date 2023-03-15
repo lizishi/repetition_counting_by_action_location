@@ -99,22 +99,22 @@ def load_proposal_file(filename):
     df = pd.read_csv(filename)
     proposal_list = []
     for i, rows in df.iterrows():
-        try:
-            video_name = rows["name"].replace(".mp4", "")
-            cls = fix_and_get_label(rows["type"])
-            if cls == -1:
-                return
-            count = int(rows["count"]) if pd.notna("count") else 0
-            n_frames = int(rows["total_frames"])
+        # try:
+        video_name = rows["name"].split(".")[0]
+        # cls = fix_and_get_label(rows["type"])
+        # if cls == -1:
+        #     return
+        count = int(rows["count"]) if pd.notna(rows["count"]) else 0
+        n_frames = int(rows["total_frames"])
 
-            labels = rows[6:]
-            gt_bbox = []
-            for i in range(count):
-                if pd.notna(labels[2 * i]) and pd.notna(labels[2 * i + 1]):
-                    gt_bbox.append([0, int(labels[2 * i]), int(labels[2 * i + 1])])
-                    # gt_bbox.append([cls, int(labels[2 * i]), int(labels[2 * i + 1])])
-        except ValueError:
-            continue
+        labels = rows[6:]
+        gt_bbox = []
+        for i in range(count):
+            if pd.notna(labels[2 * i]) and pd.notna(labels[2 * i + 1]):
+                gt_bbox.append([0, int(labels[2 * i]), int(labels[2 * i + 1])])
+                # gt_bbox.append([cls, int(labels[2 * i]), int(labels[2 * i + 1])])
+        # except ValueError:
+        #     continue
 
         proposal_list.append([video_name, n_frames, gt_bbox, []])
     return proposal_list

@@ -345,3 +345,16 @@ def preprocess_groundtruth(gt, original_len=None, to_tensor=False, device=None):
             annotation["length"] = gt_len
         gt_out.append(annotation)
     return gt_out
+
+
+def get_reference_points(temporal_dim_len, device):
+    # temporal_dim_len： the shape of temporal dimension after padding
+    ref = torch.linspace(
+        0.5,
+        temporal_dim_len - 0.5,
+        temporal_dim_len,
+        dtype=torch.float32,
+        device=device,
+    )
+    ref = ref[None] / temporal_dim_len  # (1, temporal_dim_len)
+    return ref  # (1, temporal_dim_len)

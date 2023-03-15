@@ -93,6 +93,8 @@ class React(BaseTAPGenerator):
         coef_iou_decay=1.0,  # the coefficient of the iou decay
         use_dab=False,
         no_sine_embed=False,
+        use_temporal_conv=False,
+        use_enc_anchor=False,
     ):
         super().__init__()
 
@@ -116,6 +118,10 @@ class React(BaseTAPGenerator):
 
         # Define Module
         self.input_proj = MLP(input_feat_dim, feat_dim, feat_dim, 1)
+        if use_temporal_conv:
+            self.temporal_conv = nn.Conv1d(feat_dim, feat_dim, 3, 1, 1)
+        else:
+            self.temporal_conv = None
 
         # first feat_dim as content query, last feat_dim as position query
         if use_dab:
@@ -137,6 +143,7 @@ class React(BaseTAPGenerator):
             dropout=0.0,
             use_dab=use_dab,
             no_sine_embed=no_sine_embed,
+            use_enc_anchor=use_enc_anchor,
         )
 
         self.segment_embed = MLP(feat_dim, feat_dim, 2, 3)
@@ -152,6 +159,8 @@ class React(BaseTAPGenerator):
         nn.init.constant_(self.segment_embed[0].layers[-1].bias.data[1:], -2.0)
         # hack implementation for segment refinement
         self.transformer.decoder.segment_embed = self.segment_embed
+        self.transformer.enc_out_class_embed = self.class_embed[-1]
+        self.transformer.enc_out_bbox_embed = self.segment_embed[-1]
 
         # predict the quality score
         self.iou_predictor = nn.Linear(feat_dim, 1)
@@ -219,6 +228,11 @@ class React(BaseTAPGenerator):
         origin_snippet_num = [each["origin_snippet_num"] for each in video_meta]
 
         input_feature = self.input_proj(input_feature)
+        if self.temporal_conv:
+            for i in range(input_feature.shape[1]):
+                input_feature[:, i, :, :] = self.forward_temporal_conv(
+                    input_feature[:, i, :, :]
+                )
         raw_feature.tensors = input_feature
         raw_feature.mask = masks
 
@@ -236,7 +250,7 @@ class React(BaseTAPGenerator):
 
         # serially predict the result for each clip and paralelly for the batch videos.
         for clip in range(input_feature.shape[1]):
-            result, init_reference, inter_references, _, _ = self.transformer(
+            result, init_reference, inter_references, _, _, _, _ = self.transformer(
                 input_feature[:, clip, :, :],
                 masks[:, clip, :],
                 query=query_vector,
@@ -321,10 +335,20 @@ class React(BaseTAPGenerator):
         query_vector = self.query_embed.weight
 
         input_feature = self.input_proj(input_feature)
+        if self.temporal_conv:
+            input_feature = self.forward_temporal_conv(input_feature)
         raw_feature.tensors = input_feature
         raw_feature.mask = masks
 
-        result, init_reference, inter_references, memory, tgt = self.transformer(
+        (
+            result,
+            init_reference,
+            inter_references,
+            memory,
+            tgt,
+            enc_context,
+            enc_reference,
+        ) = self.transformer(
             input_feature, masks, query_vector, snippet_num=snippet_num
         )  # bz, Lq, dim
 
@@ -334,7 +358,6 @@ class React(BaseTAPGenerator):
 
         pred_iou = self.iou_predictor(result).sigmoid()
         pred_cen = self.cen_predictor(result).sigmoid()
-
         pred = {
             "pred_logits": outputs_class[-1],
             "pred_seg": outputs_coord[-1],
@@ -376,6 +399,21 @@ class React(BaseTAPGenerator):
         aux_loss_dict = self.aux_loss(aux_out, gt_bbox, num_segs)
 
         loss_dict.update(aux_loss_dict)
+
+        # loss for encoder output
+        if enc_context is not None:
+            interm_coord = enc_reference
+            interm_class = self.transformer.enc_out_class_embed(enc_context)
+            interm_pred_iou = self.iou_predictor(enc_context).sigmoid()
+            interm_pred_cen = self.cen_predictor(enc_context).sigmoid()
+            enc_out = {
+                "pred_logits": interm_class,
+                "pred_seg": interm_coord,
+                "pred_iou": interm_pred_iou,
+                "pred_cen": interm_pred_cen,
+            }
+            enc_loss_dict = self.loss_enc_interm(enc_out, gt_bbox, num_segs)
+            loss_dict.update(enc_loss_dict)
 
         # trick, do not train classification head at the beginning of training
         self.cls_warmup_step = self.cls_warmup_step + 1
@@ -613,6 +651,20 @@ class React(BaseTAPGenerator):
         contrastive_loss = F.cross_entropy(similarity, labels)
         return contrastive_loss
 
+    def loss_enc_interm(self, enc_out, gt_bbox, num_segs):
+        indices = self.HungarianMatcher(enc_out, gt_bbox)
+        enc_interm_loss_dict = {}
+        loss_dict = self.loss_segs(enc_out, gt_bbox, indices, num_segs)
+        for each_key in loss_dict.keys():
+            enc_interm_loss_dict["enc_{}".format(each_key)] = loss_dict[each_key]
+
+        ce_loss = self.loss_labels(enc_out, gt_bbox, indices, num_segs)
+        enc_interm_loss_dict["enc_ce_loss"] = ce_loss * self.coef_ce_now
+
+        iou_decay = self.iou_decay(enc_out)
+        enc_interm_loss_dict["enc_iou_decay"] = iou_decay * self.coef_iou_decay
+        return enc_interm_loss_dict
+
     def _to_roi_align_format(self, rois, T, k=4, scale_factor=1.0):
         """Convert RoIs to RoIAlign format.
         Params:
@@ -665,6 +717,13 @@ class React(BaseTAPGenerator):
             aux_loss_dict["{}_iou_decay".format(i)] = iou_decay * self.coef_iou_decay
 
         return aux_loss_dict
+
+    def forward_temporal_conv(self, x):
+        # input x is (bz, T, dim)
+        x = x.permute(0, 2, 1)
+        x = self.temporal_conv(x)
+        x = x.permute(0, 2, 1)
+        return x
 
     @staticmethod
     def _parse_losses(losses):
