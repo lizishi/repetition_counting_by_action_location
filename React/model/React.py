@@ -91,10 +91,13 @@ class React(BaseTAPGenerator):
         coef_acedec=1.0,  # the coefficient of the ace-dec loss
         coef_quality=1.0,  # the coefficient of the quality loss
         coef_iou_decay=1.0,  # the coefficient of the iou decay
+        coef_contrastive=1.0,  # the coefficient of the contrastive loss
+        temperature=100,  # the temperature of the contrastive learning
         use_dab=False,
         no_sine_embed=False,
         use_temporal_conv=False,
         use_enc_anchor=False,
+        use_contrastive=False,
     ):
         super().__init__()
 
@@ -103,6 +106,8 @@ class React(BaseTAPGenerator):
         self.clip_len = clip_len
         self.stride_rate = stride_rate
         self.test_bg_thershold = test_bg_thershold
+        self.use_contrastive = use_contrastive
+        self.temperature = temperature
         self.K = K
 
         self.criterion = sigmoid_focal_loss
@@ -115,6 +120,7 @@ class React(BaseTAPGenerator):
         self.coef_acedec = coef_acedec
         self.coef_quality = coef_quality
         self.coef_iou_decay = coef_iou_decay
+        self.coef_contrastive = coef_contrastive
 
         # Define Module
         self.input_proj = MLP(input_feat_dim, feat_dim, feat_dim, 1)
@@ -415,6 +421,18 @@ class React(BaseTAPGenerator):
             enc_loss_dict = self.loss_enc_interm(enc_out, gt_bbox, num_segs)
             loss_dict.update(enc_loss_dict)
 
+        # loss for the contrastive learning
+        if self.use_contrastive:
+            loss_contrastive = (
+                self.loss_contrastive(
+                    result[-1],
+                    indices,
+                    self.temperature,
+                )
+                * self.coef_contrastive
+            )
+            loss_dict.update({"contrastive_loss": loss_contrastive})
+
         # trick, do not train classification head at the beginning of training
         self.cls_warmup_step = self.cls_warmup_step + 1
         if self.cls_warmup_step == 25:
@@ -433,7 +451,7 @@ class React(BaseTAPGenerator):
                 reference = inter_references[lvl - 1]
 
             reference = inverse_sigmoid(reference)
-            outputs_class = self.class_embed[lvl](result[lvl])
+            outputs_class = torch.softmax(self.class_embed[lvl](result[lvl]), -1)
             tmp = self.segment_embed[lvl](result[lvl])
             # the l-th layer (l >= 2)
             if reference.shape[-1] == 2:
@@ -661,9 +679,20 @@ class React(BaseTAPGenerator):
         ce_loss = self.loss_labels(enc_out, gt_bbox, indices, num_segs)
         enc_interm_loss_dict["enc_ce_loss"] = ce_loss * self.coef_ce_now
 
-        iou_decay = self.iou_decay(enc_out)
-        enc_interm_loss_dict["enc_iou_decay"] = iou_decay * self.coef_iou_decay
         return enc_interm_loss_dict
+
+    def loss_contrastive(self, query_feature, indices, temperature):
+        loss = 0.0
+        for i, (src, _) in enumerate(indices):
+            positive_feature = query_feature[i, src, :]
+            pos = torch.exp(
+                torch.mm(positive_feature, positive_feature.t()) / temperature
+            ).sum()
+            all = torch.exp(
+                torch.mm(query_feature[i], query_feature[i].t()) / temperature
+            ).sum()
+            loss += -torch.log(pos / all)
+        return loss / len(indices)
 
     def _to_roi_align_format(self, rois, T, k=4, scale_factor=1.0):
         """Convert RoIs to RoIAlign format.

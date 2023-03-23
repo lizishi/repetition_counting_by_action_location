@@ -1,5 +1,5 @@
 # runtime
-checkpoint_config = dict(interval=40, by_epoch=True)
+checkpoint_config = dict(interval=20, by_epoch=True)
 log_config = dict(
     interval=20,
     hooks=[
@@ -44,27 +44,27 @@ model = dict(
     coef_aceenc=0.1,
     coef_acedec=1.0,
     coef_quality=1.0,
-    coef_iou_decay=1.0,
-    use_temporal_conv=False,
-    use_enc_anchor=True,
+    coef_iou_decay=100.0,
+    coef_contrastive=0.1,
+    temperature=100.0,
+    use_contrastive=True,
 )
 
 # dataset settings
 dataset_type = "RepCountDataset"
 data_root_train = "/DATA/disk1/lizishi/LLSP/feature-frame/train_rgb.h5"
 data_root_val = "/DATA/disk1/lizishi/LLSP/feature-frame/valid_rgb.h5"
-data_root_test = "/DATA/disk1/lizishi/LLSP/feature-frame/test_rgb.h5"
-# data_root_test = (
-#     "/DATA/disk1/shangqiuyan/repnew/dataset/UCF/feature-frame-h5/valid_rgb.h5"
-# )
+# data_root_test = "/DATA/disk1/lizishi/LLSP/feature-frame/test_rgb.h5"
+data_root_test = (
+    "/DATA/disk1/shangqiuyan/repnew/dataset/UCF/feature-frame-h5/valid_rgb.h5"
+)
 flow_root_train = None
 flow_root_val = None
 
 ann_file_train = "/DATA/disk1/lizishi/LLSP/annotation/train_new.csv"
 ann_file_val = "/DATA/disk1/lizishi/LLSP/annotation/valid_new.csv"
-ann_file_test = "/DATA/disk1/lizishi/LLSP/annotation/test_new.csv"
-# ann_file_test = "/DATA/disk1/shangqiuyan/repnew/dataset/UCF/annval/valsum.csv"
-
+# ann_file_test = "/DATA/disk1/lizishi/LLSP/annotation/test_new.csv"
+ann_file_test = "/DATA/disk1/shangqiuyan/repnew/dataset/UCF/annval/valsum.csv"
 
 test_pipeline = [
     dict(
@@ -197,5 +197,5 @@ optimizer_config = dict()
 lr_config = dict(policy="step", step=[10, 180], gamma=0.1, by_epoch=True)
 
 # runtime settings
-work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230320_enc_anchor_test"
-output_config = dict(out=f"{work_dir}/results_train.json")
+work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230323_contrasive"
+output_config = dict(out=f"{work_dir}/results.json")

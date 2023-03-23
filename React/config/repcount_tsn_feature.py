@@ -194,7 +194,5 @@ optimizer_config = dict()
 lr_config = dict(policy="step", step=[7], gamma=0.1, by_epoch=True)
 
 # runtime settings
-work_dir = (
-    "/DATA/disk1/lizishi/react_out/repcount_20230315_feature_dim_256_clip_len_512"
-)
+work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230315_feature_dim_256_clip_len_512_fix_data"
 output_config = dict(out=f"{work_dir}/results.json")

@@ -72,6 +72,7 @@ class Transformer(nn.Module):
         if self.use_enc_anchor:
             self.enc_output = nn.Linear(d_model, d_model)
             self.enc_output_norm = nn.LayerNorm(d_model)
+            self.enc_dim_reduce = nn.Linear(d_model * 2, d_model)
         self.enc_out_class_embed = None
         self.enc_out_bbox_embed = None
 
@@ -165,7 +166,7 @@ class Transformer(nn.Module):
                 .permute(1, 0)
                 .unsqueeze(1)
                 .repeat(1, enc_memory.shape[1], 1)
-            )  # L_max, 1
+            )  # L_max, bz, 1
             enc_outputs_class_unselected = self.enc_out_class_embed(
                 enc_memory
             )  # L_max, bz, num_class
@@ -191,7 +192,14 @@ class Transformer(nn.Module):
             context_embed_undetached = torch.gather(
                 enc_memory, 0, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
             )  # nq, bs, dim
+            # context_embed_undetached = context_embed_undetached.mean(0).repeat(
+            #     topk, 1, 1
+            # )
             context_embed = context_embed_undetached.detach()
+            ori_context_embed = query[:, :, : self.d_model]
+            context_embed = self.enc_dim_reduce(
+                torch.cat((context_embed, ori_context_embed), dim=-1)
+            )
             query[:, :, : self.d_model] = context_embed
 
         hs, init_refpoint, ref_point, tgt = self.decoder(
