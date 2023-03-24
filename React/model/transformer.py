@@ -49,11 +49,14 @@ class Transformer(nn.Module):
         use_dab=False,
         no_sine_embed=False,
         use_enc_anchor=False,
+        content_query_type="normal",
     ):
         super().__init__()
 
         self.return_intermediate_dec = return_intermediate_dec
         self.use_enc_anchor = use_enc_anchor
+        assert content_query_type in ["normal", "add", "linear", "mean"]
+        self.content_query_type = content_query_type
 
         encoder_layer = TransformerEncoderLayer(
             d_model,
@@ -192,14 +195,24 @@ class Transformer(nn.Module):
             context_embed_undetached = torch.gather(
                 enc_memory, 0, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
             )  # nq, bs, dim
-            # context_embed_undetached = context_embed_undetached.mean(0).repeat(
-            #     topk, 1, 1
-            # )
-            context_embed = context_embed_undetached.detach()
-            ori_context_embed = query[:, :, : self.d_model]
-            context_embed = self.enc_dim_reduce(
-                torch.cat((context_embed, ori_context_embed), dim=-1)
-            )
+
+            if self.content_query_type == "normal":
+                context_embed = context_embed_undetached.detach()
+            elif self.content_query_type == "add":
+                context_embed = context_embed_undetached.detach()
+                context_embed = context_embed + query[:, :, : self.d_model]
+            elif self.content_query_type == "mean":
+                context_embed_undetached = context_embed_undetached.mean(0).repeat(
+                    topk, 1, 1
+                )
+                context_embed = context_embed_undetached.detach()
+            elif self.content_query_type == "linear":
+                context_embed = context_embed_undetached.detach()
+                ori_context_embed = query[:, :, : self.d_model]
+                context_embed = self.enc_dim_reduce(
+                    torch.cat((context_embed, ori_context_embed), dim=-1)
+                )
+
             query[:, :, : self.d_model] = context_embed
 
         hs, init_refpoint, ref_point, tgt = self.decoder(

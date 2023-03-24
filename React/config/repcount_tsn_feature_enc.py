@@ -47,6 +47,7 @@ model = dict(
     coef_iou_decay=1.0,
     use_temporal_conv=False,
     use_enc_anchor=True,
+    content_query_type="linear",
 )
 
 # dataset settings
@@ -197,5 +198,5 @@ optimizer_config = dict()
 lr_config = dict(policy="step", step=[10, 180], gamma=0.1, by_epoch=True)
 
 # runtime settings
-work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230320_enc_anchor_test"
+work_dir = "/DATA/disk1/lizishi/react_out/repcount_20230323_enc_anchor_linear"
 output_config = dict(out=f"{work_dir}/results_train.json")

@@ -98,6 +98,7 @@ class React(BaseTAPGenerator):
         use_temporal_conv=False,
         use_enc_anchor=False,
         use_contrastive=False,
+        content_query_type="normal",
     ):
         super().__init__()
 
@@ -150,6 +151,7 @@ class React(BaseTAPGenerator):
             use_dab=use_dab,
             no_sine_embed=no_sine_embed,
             use_enc_anchor=use_enc_anchor,
+            content_query_type=content_query_type,
         )
 
         self.segment_embed = MLP(feat_dim, feat_dim, 2, 3)
